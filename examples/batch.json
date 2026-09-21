@@ -1,0 +1,21 @@
+{
+  "requestId": "inspect-runtime-001",
+  "workspace": "E:/gitProjects/codex-subagents",
+  "context": "Read-only review. Do not modify files or read credentials. Each worker should report evidence and unresolved questions.",
+  "tasks": [
+    {
+      "id": "communication",
+      "title": "Review lifecycle and handoff boundaries",
+      "mode": "read-only",
+      "instruction": "Review src/mcp.ts, src/supervisor.ts, and src/worker.ts for false success after cancellation, abnormal exit, or repeated requests.",
+      "acceptance": "Support findings with file paths and line numbers. Distinguish verified behavior from untested assumptions."
+    },
+    {
+      "id": "monitor",
+      "title": "Review monitor navigation and disconnects",
+      "mode": "read-only",
+      "instruction": "Review src/monitor.ts, src/monitor-cli.ts, and src/store.ts for navigation, scrolling, state updates, and read-only boundaries.",
+      "acceptance": "Report actionable findings or explicitly state that none were found. Include evidence and verification limits."
+    }
+  ]
+}

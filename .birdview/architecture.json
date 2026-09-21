@@ -1,0 +1,1010 @@
+{
+  "schemaVersion": 1,
+  "mapId": "cpi-system",
+  "revision": 1,
+  "language": "zh",
+  "project": {
+    "id": "codex-pi-subagents",
+    "name": "Codex Pi Subagents · 项目架构"
+  },
+  "modules": [
+    {
+      "id": "codex-host",
+      "name": "Codex / Astra",
+      "role": "frontend",
+      "kind": "external",
+      "responsibility": "发起任务与纠正；等待最终交接。通知展示由宿主决定。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "examples/codex-mcp.toml",
+          "line": 2,
+          "note": "Codex MCP 接入配置样例；未在本次读取用户实际 Codex 配置。"
+        },
+        {
+          "path": ".agents/skills/pi-subagents/SKILL.md",
+          "line": 10,
+          "note": "约定等待原调用、不轮询状态、不通过日志接管 worker；是宿主指引而非强制 harness 改造。"
+        }
+      ],
+      "status": "uncertain",
+      "openQuestions": [
+        "实际 Codex/Astra 的等待行为、通知展示与技能加载效果尚未在本次接入验收。"
+      ],
+      "layout": {
+        "row": 0,
+        "column": 0
+      }
+    },
+    {
+      "id": "mcp-api",
+      "name": "MCP 接入",
+      "role": "backend",
+      "kind": "local",
+      "responsibility": "stdio 三项工具；分离 progress、消息回执与最终 handoff。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/cli.ts"
+        },
+        {
+          "kind": "file",
+          "path": "src/mcp.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        },
+        {
+          "path": "src/cli.ts",
+          "line": 33,
+          "note": "stdio 服务入口；连接关闭和信号触发 supervisor 收尾。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 31,
+          "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 0,
+        "column": 1
+      }
+    },
+    {
+      "id": "supervisor",
+      "name": "批次与进程调度",
+      "role": "backend",
+      "kind": "local",
+      "responsibility": "幂等、并发与 IPC 路由；收尾、超时和进程回收。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/supervisor.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 68,
+          "note": "批次幂等与单批限制；绝对工作目录验证，默认并发 3。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 182,
+          "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 123,
+          "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 141,
+          "note": "消息 ID 去重、最多 128 条、等待回执与超时未知状态。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 0,
+        "column": 2
+      }
+    },
+    {
+      "id": "worker-runtime",
+      "name": "pi SDK 执行器",
+      "role": "backend",
+      "kind": "local",
+      "responsibility": "每任务独立进程与内存会话；继承 pi 配置、执行工具并生成交接。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/worker.ts"
+        },
+        {
+          "kind": "file",
+          "path": "src/settings.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 50,
+          "note": "services 先加载扩展和供应商，再选择模型；每任务使用内存 AgentSession。"
+        },
+        {
+          "path": "src/settings.ts",
+          "line": 10,
+          "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 70,
+          "note": "编码模式继承 defaultTools/扩展工具，只读模式显式启用读工具及两项通信工具。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 107,
+          "note": "绑定 headless 扩展生命周期；这里 mode:rpc 是扩展上下文模式，不是 pi CLI RPC 传输。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 145,
+          "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 0,
+        "column": 3
+      }
+    },
+    {
+      "id": "contracts",
+      "name": "协议与输出边界",
+      "role": "generic",
+      "kind": "local",
+      "responsibility": "校验任务、快照与 handoff；限制大小、清理公开输出。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/protocol.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/protocol.ts",
+          "line": 3,
+          "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
+        },
+        {
+          "path": "src/protocol.ts",
+          "line": 139,
+          "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 1
+      },
+      "roleAssessment": {
+        "basis": "out-of-taxonomy",
+        "note": "src/protocol.ts 是跨组件类型/schema、交接校验与公开文本处理，不是独立前端、服务、存储、队列或权限执行系统；因此使用 generic，避免把脱敏等同于安全隔离。"
+      }
+    },
+    {
+      "id": "mailbox",
+      "name": "纠正消息队列",
+      "role": "queue",
+      "kind": "local",
+      "responsibility": "steer / followUp；分阶段回执、去重配合和取消清队列。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/mailbox.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/mailbox.ts",
+          "line": 4,
+          "note": "维护补充消息接收、关联回执、输入预处理串行化及取消清理。"
+        },
+        {
+          "path": "src/mailbox.ts",
+          "line": 49,
+          "note": "使用 SDK prompt 的 streamingBehavior 注入 steer/followUp，禁用模板展开。"
+        },
+        {
+          "path": "src/mailbox.ts",
+          "line": 20,
+          "note": "回执经 worker 的 IPC send 回调送给 supervisor。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 2
+      }
+    },
+    {
+      "id": "model-service",
+      "name": "配置的模型服务",
+      "role": "backend",
+      "kind": "external",
+      "responsibility": "通过 pi SDK 接收上下文，返回模型文本与工具调用。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 128,
+          "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
+        },
+        {
+          "path": "src/settings.ts",
+          "line": 10,
+          "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
+        },
+        {
+          "path": "tests/runtime.test.mjs",
+          "line": 20,
+          "note": "隔离临时目录与本地 HTTP 模拟模型验证真实 SDK；不证明生产服务可用。"
+        }
+      ],
+      "status": "uncertain",
+      "openQuestions": [
+        "实际供应商、模型地址、认证和远程可用性未读取或测试；本次仅描述源码中的接入边界。"
+      ],
+      "layout": {
+        "row": 1,
+        "column": 3
+      }
+    },
+    {
+      "id": "monitor",
+      "name": "cpi-monitor",
+      "role": "frontend",
+      "kind": "local",
+      "responsibility": "用户只读入口：任务列表、时间线、队列、重试和用量。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/monitor-cli.ts"
+        },
+        {
+          "kind": "file",
+          "path": "src/monitor.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/monitor.ts",
+          "line": 10,
+          "note": "只读任务列表 → 时间线；显示回执、流式事件、模型、强度、用量和失联状态。"
+        },
+        {
+          "path": "src/monitor-cli.ts",
+          "line": 25,
+          "note": "独立 CLI 复用 pi-tui，退出只关闭 monitor。"
+        },
+        {
+          "path": "src/monitor-cli.ts",
+          "line": 40,
+          "note": "每 500ms 读取快照；可按 MCP 会话过滤。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 0
+      }
+    },
+    {
+      "id": "snapshot-store",
+      "name": "监控状态快照",
+      "role": "cache",
+      "kind": "local",
+      "responsibility": "本地 JSON 原子替换；有界事件与最终交接，不能恢复会话。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/store.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/store.ts",
+          "line": 9,
+          "note": "状态目录按会话/批次隔离，以临时文件和 rename 原子替换 JSON；剔除指令与验收正文。"
+        },
+        {
+          "path": "src/store.ts",
+          "line": 27,
+          "note": "验证大小和 schema、跳过损坏快照；按心跳排序，不恢复 SDK 会话。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 333,
+          "note": "约 200ms 合并写入；写入失败取消任务并返回 storageError。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 1
+      }
+    },
+    {
+      "id": "telemetry",
+      "name": "执行事件采集",
+      "role": "backend",
+      "kind": "local",
+      "responsibility": "公开流式输出、工具事件与 SDK 状态；不采集私有思考。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/telemetry.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/telemetry.ts",
+          "line": 4,
+          "note": "公开文本与工具输出按 ID 合并；追踪 settled、队列、压缩、重试及用量。"
+        },
+        {
+          "path": "src/telemetry.ts",
+          "line": 12,
+          "note": "完整公开文本先脱敏，约 100ms 合并；最终结果覆盖中间版本，不采集 thinking delta。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 2
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "host-call",
+      "from": "codex-host",
+      "to": "mcp-api",
+      "label": "委派 / 新要求",
+      "kind": "request",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        },
+        {
+          "path": "examples/codex-mcp.toml",
+          "line": 2,
+          "note": "Codex MCP 接入配置样例；未在本次读取用户实际 Codex 配置。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "host-handoff",
+      "from": "mcp-api",
+      "to": "codex-host",
+      "label": "回执 / 最终交接",
+      "kind": "result",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 123,
+          "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "host-progress",
+      "from": "mcp-api",
+      "to": "codex-host",
+      "label": "订阅式 progress 通知",
+      "kind": "event",
+      "visibility": "detail",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 31,
+          "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "api-dispatch",
+      "from": "mcp-api",
+      "to": "supervisor",
+      "label": "delegate / message / readHandoff",
+      "kind": "request",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "batch-return",
+      "from": "supervisor",
+      "to": "mcp-api",
+      "label": "批次终态与 handoff",
+      "kind": "result",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 123,
+          "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "worker-control",
+      "from": "supervisor",
+      "to": "worker-runtime",
+      "label": "fork / start / message / cancel",
+      "kind": "control",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 182,
+          "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 141,
+          "note": "消息 ID 去重、最多 128 条、等待回执与超时未知状态。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "worker-handoff",
+      "from": "worker-runtime",
+      "to": "supervisor",
+      "label": "交接 + 正常退出",
+      "kind": "result",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 81,
+          "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 145,
+          "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 182,
+          "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "worker-progress",
+      "from": "worker-runtime",
+      "to": "supervisor",
+      "label": "进展 / 心跳 / 固定错误码",
+      "kind": "event",
+      "visibility": "detail",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 81,
+          "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 182,
+          "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "mailbox-input",
+      "from": "worker-runtime",
+      "to": "mailbox",
+      "label": "消息路由 / 等待 / 取消",
+      "kind": "control",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 95,
+          "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
+        },
+        {
+          "path": "src/mailbox.ts",
+          "line": 4,
+          "note": "维护补充消息接收、关联回执、输入预处理串行化及取消清理。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "mailbox-prompt",
+      "from": "mailbox",
+      "to": "worker-runtime",
+      "label": "SDK steer / followUp",
+      "kind": "request",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mailbox.ts",
+          "line": 49,
+          "note": "使用 SDK prompt 的 streamingBehavior 注入 steer/followUp，禁用模板展开。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "mailbox-receipt",
+      "from": "mailbox",
+      "to": "supervisor",
+      "label": "回执，经 worker IPC",
+      "kind": "event",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mailbox.ts",
+          "line": 20,
+          "note": "回执经 worker 的 IPC send 回调送给 supervisor。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "sdk-events",
+      "from": "worker-runtime",
+      "to": "telemetry",
+      "label": "SDK 会话事件",
+      "kind": "event",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 95,
+          "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "telemetry-ipc",
+      "from": "telemetry",
+      "to": "supervisor",
+      "label": "公开事件 / 状态 / 指标 IPC",
+      "kind": "event",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/telemetry.ts",
+          "line": 4,
+          "note": "公开文本与工具输出按 ID 合并；追踪 settled、队列、压缩、重试及用量。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 95,
+          "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "snapshot-write",
+      "from": "supervisor",
+      "to": "snapshot-store",
+      "label": "原子写入状态",
+      "kind": "event",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 333,
+          "note": "约 200ms 合并写入；写入失败取消任务并返回 storageError。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "monitor-read",
+      "from": "monitor",
+      "to": "snapshot-store",
+      "label": "500ms 读取快照",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/monitor-cli.ts",
+          "line": 40,
+          "note": "每 500ms 读取快照；可按 MCP 会话过滤。"
+        },
+        {
+          "path": "src/store.ts",
+          "line": 27,
+          "note": "验证大小和 schema、跳过损坏快照；按心跳排序，不恢复 SDK 会话。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "model-request",
+      "from": "worker-runtime",
+      "to": "model-service",
+      "label": "SDK 模型请求",
+      "kind": "request",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 128,
+          "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "model-response",
+      "from": "model-service",
+      "to": "worker-runtime",
+      "label": "流式响应 / 工具调用",
+      "kind": "result",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 128,
+          "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
+        },
+        {
+          "path": "tests/runtime.test.mjs",
+          "line": 20,
+          "note": "隔离临时目录与本地 HTTP 模拟模型验证真实 SDK；不证明生产服务可用。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "api-contract",
+      "from": "mcp-api",
+      "to": "contracts",
+      "label": "任务 / 消息 schema",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        },
+        {
+          "path": "src/protocol.ts",
+          "line": 3,
+          "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "supervisor-contract",
+      "from": "supervisor",
+      "to": "contracts",
+      "label": "IPC / 快照 / 交接校验",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 182,
+          "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
+        },
+        {
+          "path": "src/protocol.ts",
+          "line": 3,
+          "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "worker-contract",
+      "from": "worker-runtime",
+      "to": "contracts",
+      "label": "handoff 校验与输出清理",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 81,
+          "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
+        },
+        {
+          "path": "src/protocol.ts",
+          "line": 139,
+          "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "store-contract",
+      "from": "snapshot-store",
+      "to": "contracts",
+      "label": "快照 schema 与文本清理",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/store.ts",
+          "line": 27,
+          "note": "验证大小和 schema、跳过损坏快照；按心跳排序，不恢复 SDK 会话。"
+        },
+        {
+          "path": "src/store.ts",
+          "line": 9,
+          "note": "状态目录按会话/批次隔离，以临时文件和 rename 原子替换 JSON；剔除指令与验收正文。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    }
+  ],
+  "constraints": [
+    {
+      "id": "inherit-pi",
+      "name": "模型与思考强度继承全局 pi 设置",
+      "note": "来源：用户架构要求。实现读取 settings.json 的内存副本，模型必须明确配置；不是读取真实配置内容的报告。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "worker-runtime"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/settings.ts",
+          "line": 10,
+          "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 50,
+          "note": "services 先加载扩展和供应商，再选择模型；每任务使用内存 AgentSession。"
+        }
+      ],
+      "verification": "复核 inheritedSettings 与 SDK 初始化调用；相关隔离测试见 tests/sdk.test.mjs 和 tests/runtime.test.mjs。"
+    },
+    {
+      "id": "write-default",
+      "name": "默认允许任务目录内编码",
+      "note": "来源：用户明确选择默认允许修改任务目录。工作目录及工具列表不是 OS 沙箱；扩展属于受信代码。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "worker-runtime"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 70,
+          "note": "编码模式继承 defaultTools/扩展工具，只读模式显式启用读工具及两项通信工具。"
+        },
+        {
+          "path": "src/protocol.ts",
+          "line": 3,
+          "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
+        }
+      ],
+      "verification": "复核 taskSchema 默认模式及 coding/read-only 工具选择。"
+    },
+    {
+      "id": "readonly-monitor",
+      "name": "monitor 保持只读",
+      "note": "来源：用户选择第一版只读监控。monitor 读取状态而不向 worker 发消息。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "monitor",
+        "snapshot-store"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/monitor-cli.ts",
+          "line": 25,
+          "note": "独立 CLI 复用 pi-tui，退出只关闭 monitor。"
+        },
+        {
+          "path": "src/monitor-cli.ts",
+          "line": 40,
+          "note": "每 500ms 读取快照；可按 MCP 会话过滤。"
+        },
+        {
+          "path": "src/monitor.ts",
+          "line": 10,
+          "note": "只读任务列表 → 时间线；显示回执、流式事件、模型、强度、用量和失联状态。"
+        }
+      ],
+      "verification": "复核 monitor-cli 的读文件路径、按键处理与退出行为。"
+    },
+    {
+      "id": "handoff-boundary",
+      "name": "执行详情与主 Agent 最终交接分离",
+      "note": "来源：用户要求最终上下文以任务总结 handoff 为中心。progress 是可选客户端通知，不保证模型上下文注入。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "mcp-api",
+        "supervisor",
+        "worker-runtime",
+        "telemetry"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/supervisor.ts",
+          "line": 123,
+          "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 31,
+          "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 145,
+          "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
+        }
+      ],
+      "verification": "复核 BatchResult 投影、progress 字段与 settled/退出判断。"
+    },
+    {
+      "id": "no-polling",
+      "name": "等待原委派调用，不用日志轮询接管 worker",
+      "note": "来源：项目委派技能；此约定指导宿主行为，不强制修改 Codex harness。",
+      "origin": "local",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "mcp-api"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": ".agents/skills/pi-subagents/SKILL.md",
+          "line": 10,
+          "note": "约定等待原调用、不轮询状态、不通过日志接管 worker；是宿主指引而非强制 harness 改造。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 8,
+          "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
+        }
+      ],
+      "verification": "复核 MCP instructions 与技能文本的一致性；真实 Astra 行为需要接入验收。"
+    },
+    {
+      "id": "protected-data",
+      "name": "不采集真实凭据或私有思考",
+      "note": "来源：用户提供的 AGENTS 指令与本次架构请求。仅读取项目源码和配置样例；图内不复制认证内容。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "project",
+      "modules": [],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/protocol.ts",
+          "line": 139,
+          "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
+        },
+        {
+          "path": "src/telemetry.ts",
+          "line": 12,
+          "note": "完整公开文本先脱敏，约 100ms 合并；最终结果覆盖中间版本，不采集 thinking delta。"
+        }
+      ],
+      "verification": "核对产物仅含源码定位和配置路径，不含真实凭据；流式采集仅保留公开文本。"
+    },
+    {
+      "id": "execution-environment",
+      "name": "中文沟通，终端使用 Git Bash",
+      "note": "来源：用户提供的 AGENTS 指令。本次只生成架构产物；不修改实现、全局配置或运行正式模型请求。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "project",
+      "modules": [],
+      "relationships": [],
+      "evidence": [],
+      "verification": "本次命令经 C:/Git/bin/bash.exe 执行；检查产物范围及中文说明。"
+    }
+  ],
+  "constraintDiscovery": {
+    "checkedAt": "2026-09-21T13:11:46.280Z",
+    "checkedPaths": [
+      "AGENTS.md",
+      "src",
+      "tests",
+      "examples",
+      "README.md",
+      "package.json",
+      ".agents/skills/pi-subagents/SKILL.md"
+    ],
+    "uninspectedPaths": [
+      "node_modules",
+      "dist"
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+# 合并到需要接入的 Codex 配置；请调整仓库的绝对路径。
+[mcp_servers.pi_subagents]
+command = "node"
+args = ["E:/gitProjects/codex-subagents/dist/cli.js"]
+startup_timeout_sec = 20
+# 默认单任务 30 分钟；4 个任务、并发 3 时可能需要两轮。
+tool_timeout_sec = 3900
+
+# 如需更低并发或独立状态目录，可在 args 后追加：
+# "--parallelism", "2", "--state-dir", "E:/cpi-state"
