@@ -66,7 +66,7 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
     const time = event.at.slice(11, 19);
     if (kind === "tools" && event.kind !== "tool") {
       const output = event.id?.startsWith("tool-") ? outputs.get(event.id.slice(5)) : event;
-      const status = output?.kind === "tool_error" ? "失败" : output?.kind === "tool_end" ? "完成" : "执行中";
+      const status = output?.kind === "tool_error" ? "失败" : output?.kind === "tool_denied" ? "未获批准" : output?.kind === "tool_end" ? "完成" : "执行中";
       const tone = status === "失败" ? "error" : "tools";
       const name = toolName(event);
       const body: string[] = [];

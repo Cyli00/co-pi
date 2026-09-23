@@ -1,9 +1,10 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import { isTerminal, type Snapshot, type TaskState } from "./protocol.js";
+import { isTerminal, type Phase, type Snapshot, type TaskState } from "./protocol.js";
 import { filters, MonitorStyle, plainLine, renderFeed, type FeedFilter } from "./monitor-view.js";
+import type { CodexUsage } from "./codex-usage.js";
 
 export type MonitorRoute = { page: "tasks" } | { page: "task"; sessionId: string; batchId: string; taskId: string };
-const labels: Record<string, string> = {
+const labels: Record<Phase, string> = {
   queued: "排队", starting: "启动中", running: "执行中", summarizing: "交接中", completed: "已完成",
   partial: "部分完成", blocked: "受阻", failed: "失败", cancelled: "已取消",
 };
@@ -19,6 +20,7 @@ export class MonitorRouter implements Component {
   private filter: FeedFilter = "all";
   private expanded = false;
   private help = false;
+  private codexUsage: CodexUsage = { state: "searching", automatic: true };
   private readonly style: MonitorStyle;
   constructor(private height: () => number, private redraw: () => void, private quit: () => void, options: { color?: boolean } = {}) {
     this.style = new MonitorStyle(options.color ?? true);
@@ -36,6 +38,7 @@ export class MonitorRouter implements Component {
     this.selected = Math.max(0, Math.min(this.selected, this.entries().length - 1));
     this.redraw();
   }
+  updateCodexUsage(usage: CodexUsage) { this.codexUsage = usage; this.redraw(); }
   invalidate() {}
   private entries() { return this.snapshots.flatMap(snapshot => snapshot.tasks.map(state => ({ snapshot, state }))); }
   private status(snapshot: Snapshot, state: TaskState) {
@@ -106,7 +109,7 @@ export class MonitorRouter implements Component {
     };
     const paint = this.style.paint.bind(this.style);
     const entries = this.entries();
-    const header = [paint("text", "CPI MONITOR", true) + paint("muted", "  /  子代理工作台 · 只读")];
+    const header = [paint("text", "CO-PI MONITOR", true) + paint("muted", "  /  子代理工作台 · 只读")];
     if (this.help) return this.renderHelp(width, rows);
     const frame = (content: string[], footer: string[]) => {
       const room = Math.max(0, rows - footer.length);
@@ -117,7 +120,7 @@ export class MonitorRouter implements Component {
     if (this.route.page === "tasks") {
       const active = entries.filter(e => !isTerminal(e.state.phase)).length;
       header.push(paint("stages", `任务 ${entries.length}  ·  活跃 ${active}`) + paint("muted", `  ·  结束 ${entries.length - active}`), paint("muted", "─".repeat(Math.min(width, 160))));
-      const footer = [paint("muted", width < 80 ? "j/k 选择 · Enter 详情 · ? 帮助 · q 退出" : "j/k ↑↓ 选择 · Enter 详情 · u/d 翻页 · ? 帮助 · q 退出")];
+      const footer = [...this.cacheFooter(width, rows), paint("muted", width < 80 ? "j/k 选择 · Enter 详情 · ? 帮助 · q 退出" : "j/k ↑↓ 选择 · Enter 详情 · u/d 翻页 · ? 帮助 · q 退出")];
       const cardSize = rows >= 12 ? 3 : 1;
       this.pageSize = Math.max(1, Math.floor((rows - header.length - footer.length) / cardSize));
       const start = Math.floor(this.selected / this.pageSize) * this.pageSize;
@@ -134,7 +137,7 @@ export class MonitorRouter implements Component {
     } else {
       const route = this.route;
       const entry = entries.find(e => e.snapshot.sessionId === route.sessionId && e.snapshot.batchId === route.batchId && e.state.task.id === route.taskId);
-      if (!entry) return frame([...header, "任务当前不可用。请检查状态目录。"], ["b / Esc 返回列表"]);
+      if (!entry) return frame([...header, "任务当前不可用。请检查状态目录。"], [...this.cacheFooter(width, rows), "b / Esc 返回列表"]);
       const { snapshot, state } = entry;
       header.push(paint(state.error ? "error" : "stages", `[${plainLine(this.status(snapshot, state))}] `) + paint("text", plainLine(state.task.title), true));
       if (rows >= 12) header.push(paint("muted", `${plainLine(state.model ?? "模型待加载")}  ·  思考强度 ${plainLine(state.thinking ?? "—")}  ·  ${plainLine(snapshot.workspace)}`));
@@ -150,13 +153,38 @@ export class MonitorRouter implements Component {
       header.push(paint("muted", "─".repeat(Math.min(width, 160))));
       const content = renderFeed(state, width, this.filter, this.expanded, this.style);
       this.detailLength = content.length;
-      const footer = [paint("muted", width < 55 ? "j/k · u/d 翻页 · ? 帮助" : width < 90 ? "j/k 滚动 · u/d 翻页 · f 跟随 · ? 帮助" : "j/k 滚动 · u/d 翻页 · g 顶部 · f 跟随 · e 展开 · b 返回 · ? 帮助")];
+      const footer = [...this.cacheFooter(width, rows), paint("muted", width < 55 ? "j/k · u/d 翻页 · ? 帮助" : width < 90 ? "j/k 滚动 · u/d 翻页 · f 跟随 · ? 帮助" : "j/k 滚动 · u/d 翻页 · g 顶部 · f 跟随 · e 展开 · b 返回 · ? 帮助")];
       this.pageSize = Math.max(1, rows - header.length - footer.length - 1);
       const offset = this.follow ? Math.max(0, content.length - this.pageSize) : Math.min(this.offset, Math.max(0, content.length - this.pageSize));
       this.offset = offset;
       footer.unshift(paint(this.follow ? "stages" : "muted", `${this.follow ? "● 跟随" : "○ 浏览"}  ${offset + 1}–${Math.min(content.length, offset + this.pageSize)} / ${content.length} 行  · 工具${this.expanded ? "展开" : "摘要"}`));
       return frame([...header, ...content.slice(offset, offset + this.pageSize)], footer);
     }
+  }
+
+  private cacheFooter(width: number, rows: number): string[] {
+    if (rows < 5) return [];
+    const usage = this.codexUsage;
+    const paint = this.style.paint.bind(this.style);
+    const valid = usage.state === "ready" && usage.inputTokens !== undefined && usage.inputTokens > 0;
+    const ratio = valid ? (usage.cachedInputTokens ?? 0) / usage.inputTokens! : undefined;
+    const percent = ratio === undefined ? "—" : `${(ratio * 100).toFixed(1)}%`;
+    const label = width < 55 ? "主 agent 缓存" : "主 agent cache-hit";
+    const slots = width >= 75 ? 16 : width >= 55 ? 10 : 0;
+    const filled = Math.round((ratio ?? 0) * slots);
+    const bar = slots ? ` [${"━".repeat(filled)}${"─".repeat(slots - filled)}]` : "";
+    const status = usage.state === "searching" ? "未找到线程 · --codex-thread 指定"
+      : usage.state === "unavailable" ? "记录暂不可读"
+      : usage.state === "waiting" ? "等待用量记录"
+      : !valid ? "本次输入为 0" : "最近一次请求";
+    const age = usage.updatedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(usage.updatedAt)) / 1000)) : undefined;
+    const elapsed = age === undefined ? "" : age < 60 ? `${age}s 前更新` : age < 3600 ? `${Math.floor(age / 60)}m 前更新` : `${Math.floor(age / 3600)}h 前更新`;
+    const result = [paint("stages", `${label}${bar} ${percent}`, true) + paint("muted", ` · ${status}`)];
+    if (rows >= 12) {
+      const counts = usage.inputTokens === undefined ? "" : `${usage.cachedInputTokens!.toLocaleString("en-US")} / ${usage.inputTokens.toLocaleString("en-US")} tokens · `;
+      result.push(paint("muted", usage.threadId ? `${counts}${usage.automatic ? "自动" : "线程"} ${usage.threadId.slice(0, 8)}${elapsed ? ` · ${elapsed}` : ""}` : "在项目目录启动，或用 --workspace 指定项目"));
+    }
+    return result;
   }
 
   private renderHelp(width: number, rows: number): string[] {

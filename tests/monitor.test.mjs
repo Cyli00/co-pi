@@ -65,6 +65,17 @@ test('终端控制序列与常见令牌脱敏，非法完成交接拒绝', () =>
   assert.throws(() => cleanHandoff({ ...handoff(), unresolved: ['未执行验证'] }));
 });
 
+test('审批拒绝显示未获批准，不误标为工具或任务失败', () => {
+  const state = snapshot().tasks[0];
+  state.events = [
+    { at: '2026-09-22T10:00:00Z', id: 'tool-denied', kind: 'tool_start', text: 'bash {}' },
+    { at: '2026-09-22T10:00:01Z', id: 'output-denied', kind: 'tool_denied', text: 'bash\ncontinue, try another safer way.' },
+  ];
+  const output = renderFeed(state, 100, 'tools', false, new MonitorStyle(false)).join('\n');
+  assert.match(output, /未获批准/);
+  assert.doesNotMatch(output, /失败|执行中/);
+});
+
 test('单个损坏状态文件不影响其他任务', t => {
   const root = temporary(t);
   const sessionId = randomUUID();
@@ -93,7 +104,7 @@ test('真实 pi-tui 渲染器可启动、分发按键、重绘与恢复终端', 
   try {
     tui.start();
     await delay(40);
-    assert.ok(terminal.output.includes('CPI MONITOR'));
+    assert.ok(terminal.output.includes('CO-PI MONITOR'));
     terminal.input('\r');
     await delay(40);
     assert.equal(router.route.page, 'task');
@@ -165,7 +176,7 @@ test('窄屏、低高度与元数据换行保持逐行边界；颜色可关闭',
   const router = new MonitorRouter(() => 20, () => {}, () => {});
   router.update([state]);
   assert.ok(router.render(90).join('\n').includes('\x1b['));
-  assert.ok(stripTerminalSequences(router.render(90).join('\n')).includes('CPI MONITOR'));
+  assert.ok(stripTerminalSequences(router.render(90).join('\n')).includes('CO-PI MONITOR'));
 });
 
 test('思考事件只保留阶段，工具开始与正文生成均结束思考状态', () => {
@@ -181,4 +192,25 @@ test('思考事件只保留阶段，工具开始与正文生成均结束思考�
   telemetry.flush();
   assert.ok(events.some(event => event.kind === 'thinking' && event.final === true));
   assert.ok(!JSON.stringify(events).includes('PRIVATE_SENTINEL'));
+});
+
+test('主 agent 缓存条固定在快捷键上方，随用量变化且不混用 worker 指标', () => {
+  const router = new MonitorRouter(() => 24, () => {}, () => {}, { color: false });
+  router.update([snapshot()]);
+  const usage = { state: 'ready', automatic: false, threadId: '12345678-abcd-1234-abcd-123456789abc', inputTokens: 1000, cachedInputTokens: 800, updatedAt: new Date().toISOString() };
+  router.updateCodexUsage(usage);
+  for (const detail of [false, true]) {
+    if (detail) router.handleInput('\r');
+    const lines = router.render(120);
+    assert.match(lines.at(-3), /主 agent cache-hit.*80\.0%/);
+    assert.match(lines.at(-2), /800 \/ 1,000 tokens.*12345678.*更新/);
+    assert.match(lines.at(-1), /帮助/);
+  }
+  router.updateCodexUsage({ ...usage, cachedInputTokens: 0 });
+  assert.match(router.render(120).at(-3), /0\.0%/);
+  router.updateCodexUsage({ ...usage, inputTokens: 0, cachedInputTokens: 0 });
+  assert.match(router.render(120).at(-3), /—.*本次输入为 0/);
+  router.updateCodexUsage({ ...usage, state: 'unavailable' });
+  assert.match(router.render(120).at(-3), /—.*记录暂不可读/);
+  for (const width of [1, 12, 40, 80]) assert.ok(router.render(width).every(line => visibleWidth(line) <= width));
 });
