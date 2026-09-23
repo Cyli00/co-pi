@@ -1,4 +1,14 @@
 import { z } from "zod";
+import type { PermissionAction, PermissionDecision } from "./permission-approval.js";
+import {
+  HANDOFF_ARRAY_MAX, HANDOFF_EVIDENCE_PATH_MAX, HANDOFF_MAX_BYTES, HANDOFF_NEXT_STEPS_MAX,
+  HANDOFF_STATUSES, HANDOFF_TEXT_MAX, HANDOFF_TEXT_MIN, PHASES, VERIFICATION_RESULTS,
+  isTerminal, type Phase,
+} from "./handoff-contract.js";
+
+// 契约与阶段类型统一从 handoff-contract 派生，保持既有导入路径可用。
+export { isTerminal };
+export type { Phase };
 
 export const taskSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
@@ -14,31 +24,29 @@ export const batchSchema = z.object({
   tasks: z.array(taskSchema).min(1).max(4),
 }).strict().refine(b => new Set(b.tasks.map(t => t.id)).size === b.tasks.length, "Task IDs must be unique");
 
-const shortText = z.string().min(1).max(2_000);
+const shortText = z.string().min(HANDOFF_TEXT_MIN).max(HANDOFF_TEXT_MAX);
 export const handoffSchema = z.object({
-  status: z.enum(["completed", "partial", "blocked"]),
+  status: z.enum(HANDOFF_STATUSES),
   summary: shortText,
-  changes: z.array(shortText).max(20),
+  changes: z.array(shortText).max(HANDOFF_ARRAY_MAX),
   verification: z.array(z.object({
     action: shortText,
-    result: z.enum(["passed", "failed", "not_run"]),
+    result: z.enum(VERIFICATION_RESULTS),
     detail: shortText,
-  }).strict()).max(20),
+  }).strict()).max(HANDOFF_ARRAY_MAX),
   evidence: z.array(z.object({
-    path: z.string().min(1).max(500),
+    path: z.string().min(HANDOFF_TEXT_MIN).max(HANDOFF_EVIDENCE_PATH_MAX),
     line: z.number().int().positive().optional(),
     note: shortText,
-  }).strict()).max(20),
-  unresolved: z.array(shortText).max(20),
-  nextSteps: z.array(shortText).max(10),
+  }).strict()).max(HANDOFF_ARRAY_MAX),
+  unresolved: z.array(shortText).max(HANDOFF_ARRAY_MAX),
+  nextSteps: z.array(shortText).max(HANDOFF_NEXT_STEPS_MAX),
 }).strict().refine(h => h.status !== "completed" || h.unresolved.length === 0,
-  "Use partial or blocked when unresolved work remains");
+  { message: "Use partial or blocked when unresolved work remains", path: ["unresolved"] });
 
 export type Task = z.infer<typeof taskSchema>;
 export type Batch = z.infer<typeof batchSchema>;
 export type Handoff = z.infer<typeof handoffSchema>;
-export type Phase = "queued" | "starting" | "running" | "summarizing" | "completed" | "partial" | "blocked" | "failed" | "cancelled";
-export const isTerminal = (phase: Phase) => ["completed", "partial", "blocked", "failed", "cancelled"].includes(phase);
 
 export interface Activity {
   id?: string;
@@ -99,7 +107,7 @@ export const snapshotSchema = z.object({
   workspace: z.string().max(32_768),
   tasks: z.array(z.object({
     task: taskSchema.extend({ instruction: z.string().max(24_000), acceptance: z.string().max(4_000) }),
-    phase: z.enum(["queued", "starting", "running", "summarizing", "completed", "partial", "blocked", "failed", "cancelled"]),
+    phase: z.enum(PHASES),
     updatedAt: z.string().datetime(), heartbeatAt: z.string().datetime().optional(),
     model: z.string().max(200).optional(), thinking: z.string().max(20).optional(), summary: z.string().max(2_000),
     events: z.array(z.object({ id: z.string().max(200).optional(), final: z.boolean().optional(), at: z.string().datetime(), kind: z.string().max(40), text: z.string().max(4_000) })).max(200),
@@ -115,8 +123,10 @@ export interface WorkerStart {
   agentDir: string;
 }
 export type MessageCommand = { type: "message"; id: string; mode: MessageMode; text: string };
-export type WorkerCommand = WorkerStart | { type: "cancel" } | MessageCommand;
+export type WorkerCommand = WorkerStart | { type: "cancel" } | MessageCommand
+  | { type: "permission_decision"; id: string; decision: PermissionDecision };
 export type WorkerEvent =
+  | { type: "permission_approval"; id: string; action: PermissionAction }
   | { type: "ready"; model: string; thinking: string }
   | { type: "heartbeat" }
   | { type: "activity"; kind: string; text: string; id?: string; final?: boolean }
@@ -151,9 +161,27 @@ export function safeText(value: unknown, limit = 4_000): string {
 
 export function cleanHandoff(value: unknown): Handoff {
   const handoff = handoffSchema.parse(value);
-  if (Buffer.byteLength(JSON.stringify(handoff)) > 32_000) throw new CpiError("handoff_too_large");
+  if (Buffer.byteLength(JSON.stringify(handoff)) > HANDOFF_MAX_BYTES) throw new CpiError("handoff_too_large");
   const clean = (v: unknown): unknown => typeof v === "string" ? safeText(v, 2_000)
     : Array.isArray(v) ? v.map(clean)
     : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, item]) => [k, clean(item)])) : v;
   return handoffSchema.parse(clean(handoff));
+}
+
+export function prepareHandoff(value: unknown): Handoff {
+  try { return cleanHandoff(value); }
+  catch (error) {
+    if (!(error instanceof z.ZodError) && !(error instanceof CpiError && error.code === "handoff_too_large")) throw error;
+    // 只反馈字段和约束，不回显可能含凭据的原始参数或未知字段名。
+    const issues = error instanceof z.ZodError ? error.issues.map(issue => ({
+      path: issue.path.join(".") || "$",
+      code: issue.code === "invalid_type" && issue.received === "undefined" ? "required" : issue.code,
+      message: issue.code === "invalid_enum_value" ? `Expected one of: ${issue.options.join(", ")}`
+        : issue.code === "unrecognized_keys" ? "Unexpected fields are not allowed." : issue.message,
+    })) : [{ path: "$", code: "handoff_too_large", message: `Handoff must not exceed ${HANDOFF_MAX_BYTES.toLocaleString("en-US")} UTF-8 bytes.` }];
+    throw new Error(JSON.stringify({
+      error: "handoff_validation_failed", issues: issues.slice(0, 20), remainingIssues: Math.max(0, issues.length - 20),
+      instruction: "Handoff was not accepted. Correct the listed fields and call submit_handoff again with the complete object. All seven top-level fields are required; arrays may be empty. Do not invent verification or evidence. Only evidence[].line may be omitted.",
+    }));
+  }
 }

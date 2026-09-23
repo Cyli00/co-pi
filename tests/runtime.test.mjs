@@ -50,9 +50,69 @@ async function setup(t, handler, { extension = '', settings: overrides = {} } = 
   supervisor = new Supervisor({ agentDir, stateDir: join(root, 'state'), taskTimeoutMs: 30_000 });
   const snapshots = [];
   supervisor.on('progress', snapshot => snapshots.push(structuredClone(snapshot)));
-  return { root, agentDir, requests, snapshots, supervisor, run: (mode = 'coding', signal) => supervisor.delegate({ requestId: 'runtime', workspace: root, tasks: [{ ...task('one'), mode }] }, signal) };
+  const approvals = [];
+  // 此组用临时数据验证队列和流式输出；真实审批协议另有集成测试覆盖。
+  return { root, agentDir, requests, snapshots, supervisor, approvals, run: (mode = 'coding', signal) => supervisor.delegate({ requestId: 'runtime', workspace: root, tasks: [{ ...task('one'), mode }] }, signal,
+    async action => { approvals.push(action); return { approved: true }; }) };
 }
 const finalCalls = (summary = '已完成') => [{ id: `handoff-${summary}`, name: 'submit_handoff', args: handoff(summary) }];
+
+test('交接缺少必填字段时退回具体错误，worker 补齐后重新提交', { timeout: 45_000 }, async t => {
+  const invalid = handoff();
+  delete invalid.verification;
+  const env = await setup(t, (_req, res, requests) => {
+    if (requests.length === 1) return stream(res, { calls: [{ id: 'invalid-handoff', name: 'submit_handoff', args: invalid }] });
+    stream(res, requests.length === 2 ? { calls: finalCalls('补齐 verification 后完成') } : {});
+  });
+  const result = await env.run('read-only');
+  assert.equal(result.tasks[0].status, 'completed');
+  assert.equal(result.tasks[0].handoff.summary, '补齐 verification 后完成');
+  const feedback = env.requests[1].messages.find(m => m.role === 'tool' && m.tool_call_id === 'invalid-handoff');
+  assert.match(JSON.stringify(feedback.content), /handoff_validation_failed/);
+  assert.match(JSON.stringify(feedback.content), /verification/);
+  assert.match(JSON.stringify(feedback.content), /required/);
+  assert.match(JSON.stringify(feedback.content), /submit_handoff/);
+});
+
+test('最新交接无效时旧交接失效，模型停止后仍要求重新生成', { timeout: 45_000 }, async t => {
+  const invalid = handoff();
+  delete invalid.evidence;
+  const env = await setup(t, (_req, res, requests) => {
+    if (requests.length === 1) return stream(res, { calls: finalCalls('旧交接不能交付') });
+    if (requests.length === 2) return stream(res, { calls: [{ id: 'replacement-invalid', name: 'submit_handoff', args: invalid }] });
+    if (requests.length === 4) return stream(res, { calls: finalCalls('重新生成后的交接') });
+    stream(res, {});
+  });
+  const result = await env.run('read-only');
+  assert.equal(result.tasks[0].status, 'completed');
+  assert.equal(result.tasks[0].handoff.summary, '重新生成后的交接');
+  assert.ok(env.requests[3].tools.every(t => t.function.name === 'submit_handoff'));
+});
+
+test('始终缺少必填结构时不会交付伪造 handoff，也不会无限追加总结轮次', { timeout: 45_000 }, async t => {
+  const env = await setup(t, (_req, res, requests) => stream(res, requests.length % 2
+    ? { calls: [{ id: `bad-${requests.length}`, name: 'submit_handoff', args: { status: 'completed', summary: '结构不完整' } }] }
+    : {}));
+  const result = await env.run('read-only');
+  assert.equal(result.tasks[0].status, 'failed');
+  assert.equal(result.tasks[0].error, 'handoff_missing');
+  assert.equal(result.tasks[0].handoff, undefined);
+  assert.equal(env.requests.length, 4);
+});
+
+test('同一模型回复内多次交接按顺序处理，最后一次无效就必须重交', { timeout: 45_000 }, async t => {
+  const invalid = handoff();
+  delete invalid.nextSteps;
+  const env = await setup(t, (_req, res, requests) => {
+    if (requests.length === 1) return stream(res, { calls: [...finalCalls('较早提交'),
+      { id: 'latest-invalid', name: 'submit_handoff', args: invalid }] });
+    if (requests.length === 3) return stream(res, { calls: finalCalls('顺序校验后重新提交') });
+    stream(res, {});
+  });
+  const result = await env.run('read-only');
+  assert.equal(result.tasks[0].status, 'completed');
+  assert.equal(result.tasks[0].handoff.summary, '顺序校验后重新提交');
+});
 
 test('扩展供应商先注册、session_start 生效，继承 defaultTools 并保留通信工具', { timeout: 45_000 }, async t => {
   const env = await setup(t, (req, res) => stream(res, req.messages.some(m => m.role === 'tool') ? {} : { calls: finalCalls() }), {

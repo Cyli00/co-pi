@@ -10,6 +10,8 @@ import {
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
 import { StateStore } from "./store.js";
+import { isSettled } from "./handoff-contract.js";
+import { permissionActionSchema, permissionDecisionSchema, type PermissionReviewer } from "./permission-approval.js";
 
 export interface SupervisorOptions {
   stateDir: string;
@@ -38,6 +40,8 @@ interface BatchRun {
   snapshot: Snapshot;
   controller: AbortController;
   promise: Promise<BatchResult>;
+  reviewPermission?: PermissionReviewer;
+  result?: BatchResult;
 }
 interface LiveWorker {
   child: ChildProcess;
@@ -56,16 +60,25 @@ export class Supervisor extends EventEmitter {
   private storageFailed = false;
   private readonly heartbeat: NodeJS.Timeout;
   private flushTimer?: NodeJS.Timeout;
+  private readonly dirty = new Map<string, Snapshot>();
+  private flushing?: Promise<void>;
+  private closePromise?: Promise<void>;
 
   constructor(readonly options: SupervisorOptions) {
     super();
     if (!Number.isInteger(options.parallelism ?? 3) || (options.parallelism ?? 3) < 1 || (options.parallelism ?? 3) > 4) throw new CpiError("parallelism_invalid");
     this.store = new StateStore(options.stateDir);
-    this.heartbeat = setInterval(() => this.flush(), 5_000);
+    this.heartbeat = setInterval(() => {
+      for (const run of this.runs.values()) if (!run.snapshot.closed) {
+        run.snapshot.heartbeatAt = new Date().toISOString();
+        this.dirty.set(run.snapshot.batchId, run.snapshot);
+      }
+      void this.flush();
+    }, 5_000);
     this.heartbeat.unref();
   }
 
-  async delegate(value: unknown, signal?: AbortSignal): Promise<BatchResult> {
+  async delegate(value: unknown, signal?: AbortSignal, reviewPermission?: PermissionReviewer): Promise<BatchResult> {
     const batch = batchSchema.parse(value);
     if (!isAbsolute(batch.workspace)) throw new CpiError("workspace_must_be_absolute");
     try {
@@ -91,14 +104,24 @@ export class Supervisor extends EventEmitter {
     const controller = new AbortController();
     const cancel = () => controller.abort();
     signal?.addEventListener("abort", cancel, { once: true });
-    const run: BatchRun = { hash, snapshot, controller, promise: Promise.resolve(undefined as never) };
+    const run: BatchRun = { hash, snapshot, controller, reviewPermission, promise: Promise.resolve(undefined as never) };
     this.runs.set(batch.requestId, run);
-    run.promise = this.execute(batch, run).finally(() => {
+    run.promise = this.execute(batch, run).finally(async () => {
       signal?.removeEventListener("abort", cancel);
-      this.active = false;
       snapshot.closed = true;
-      this.flush();
-    }).then(result => ({ ...result, storageError: this.storageFailed ? "state_write_failed" : undefined }));
+      this.dirty.set(snapshot.batchId, snapshot);
+      await this.flush();
+      this.active = false;
+    }).then(result => {
+      run.result = { ...result, storageError: this.storageFailed ? "state_write_failed" : undefined };
+      // 完整监控历史已经落盘；连接内仅保留幂等重试所需的交接和终态。
+      for (const state of snapshot.tasks) {
+        state.events = [];
+        state.task = { ...state.task, instruction: "", acceptance: "" };
+      }
+      run.reviewPermission = undefined;
+      return run.result;
+    });
     return run.promise;
   }
 
@@ -134,8 +157,8 @@ export class Supervisor extends EventEmitter {
   readHandoff(batchId: string): BatchResult {
     const run = this.runs.get(batchId);
     if (!run) throw new CpiError("batch_unknown");
-    if (!run.snapshot.closed) throw new CpiError("handoff_not_ready_wait_original_call");
-    return this.result(run.snapshot);
+    if (!run.result) throw new CpiError("handoff_not_ready_wait_original_call");
+    return run.result;
   }
 
   async message(batchId: string, taskId: string, text: string, mode: MessageMode = "steer", id: string = randomUUID()): Promise<MessageReceipt> {
@@ -200,8 +223,12 @@ export class Supervisor extends EventEmitter {
       let outcome: { handoff?: Handoff; error?: string } | undefined;
       let shutdownTimer: NodeJS.Timeout | undefined;
       let lastHeartbeat = Date.now();
+      const approvalLifetime = new AbortController();
+      const approvalIds = new Set<string>();
+      let approvalsPending = 0;
       const stop = (code: string) => {
         if (settled) return;
+        approvalLifetime.abort();
         outcome = { error: code };
         void this.send(child, { type: "cancel" }).catch(() => {});
         armShutdown();
@@ -218,6 +245,7 @@ export class Supervisor extends EventEmitter {
       const complete = (exitError?: string) => {
         if (settled) return;
         settled = true;
+        approvalLifetime.abort();
         clearTimeout(timeout);
         clearInterval(watchdog);
         if (shutdownTimer) clearTimeout(shutdownTimer);
@@ -250,6 +278,28 @@ export class Supervisor extends EventEmitter {
           if (!event || typeof event !== "object") throw new Error();
           lastHeartbeat = Date.now();
           state.heartbeatAt = new Date().toISOString();
+          if (event.type === "permission_approval") {
+            if (!live.accepting || approvalsPending >= 32
+              || !/^[a-f0-9-]{36}$/.test(event.id) || approvalIds.has(event.id)) throw new Error();
+            const action = permissionActionSchema.parse(event.action);
+            approvalIds.add(event.id);
+            approvalsPending++;
+            this.activity(state, "approval", "等待 Codex 审批外部访问或未知范围的工具操作");
+            this.changed(run.snapshot);
+            void (async () => {
+              let decision;
+              try {
+                decision = permissionDecisionSchema.parse(await run.reviewPermission?.(action, state.task.id, approvalLifetime.signal)
+                  ?? { approved: false, reason: "permission_approval_unavailable" });
+              } catch { decision = { approved: false, reason: "permission_approval_failed" }; }
+              approvalsPending--;
+              if (settled || outcome || approvalLifetime.signal.aborted) return;
+              this.activity(state, "approval", decision.approved ? "Codex 已批准本次工具操作" : `本次工具未获批准，继续尝试更安全的方式：${safeText(decision.reason ?? "permission_approval_denied", 2_000)}`);
+              this.changed(run.snapshot);
+              await this.send(child, { type: "permission_decision", id: event.id, decision }).catch(() => stop("worker_input_failed"));
+            })();
+            return;
+          }
           if (event.type === "heartbeat") { this.changed(run.snapshot); return; }
           if (event.type === "ready") {
             state.phase = "running";
@@ -272,7 +322,8 @@ export class Supervisor extends EventEmitter {
             state.summary = safeText(event.summary, 300);
             this.activity(state, "progress", state.summary);
           } else if (event.type === "result") {
-            if (!state.runtime?.settled || state.runtime.compacting || state.runtime.retry || state.runtime.queue.steering || state.runtime.queue.followUp) { stop("worker_not_settled"); return; }
+            if (approvalsPending) { stop("worker_approval_pending"); return; }
+            if (!isSettled(state.runtime)) { stop("worker_not_settled"); return; }
             outcome = { handoff: cleanHandoff(event.handoff) };
             live.accepting = false;
             armShutdown();
@@ -323,26 +374,47 @@ export class Supervisor extends EventEmitter {
   }
 
   private changed(snapshot: Snapshot) {
+    this.dirty.set(snapshot.batchId, snapshot);
     this.emit("progress", snapshot);
-    if (!this.flushTimer) this.flushTimer = setTimeout(() => { this.flushTimer = undefined; this.flush(); }, 200);
+    if (!this.flushTimer) this.flushTimer = setTimeout(() => { this.flushTimer = undefined; void this.flush(); }, 200);
   }
 
-  private flush() {
-    for (const run of this.runs.values()) {
-      if (!run.snapshot.closed) run.snapshot.heartbeatAt = new Date().toISOString();
-      try { this.store.write(run.snapshot); }
-      catch { this.storageFailed = true; run.controller.abort(); this.emit("storageError", "state_write_failed"); }
+  private async flush(): Promise<void> {
+    do {
+      this.flushing ??= this.persist().finally(() => { this.flushing = undefined; });
+      await this.flushing;
+    } while (this.dirty.size && !this.storageFailed);
+  }
+
+  private async persist(): Promise<void> {
+    while (this.dirty.size && !this.storageFailed) {
+      const [batchId, snapshot] = this.dirty.entries().next().value!;
+      this.dirty.delete(batchId);
+      try { await this.store.write(snapshot); }
+      catch (error) {
+        this.storageFailed = true;
+        this.runs.get(batchId)?.controller.abort();
+        const { code, syscall } = error as NodeJS.ErrnoException;
+        this.emit("storageError", "state_write_failed", {
+          code: typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : "UNKNOWN",
+          syscall: ["open", "write", "rename"].includes(syscall ?? "") ? syscall : "unknown",
+        });
+      }
     }
+    if (this.storageFailed) this.dirty.clear();
   }
 
-  async close(): Promise<void> {
-    if (this.closing) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
-    for (const run of this.runs.values()) run.controller.abort();
-    await Promise.allSettled([...this.runs.values()].map(run => run.promise));
     clearInterval(this.heartbeat);
-    if (this.flushTimer) clearTimeout(this.flushTimer);
-    this.flush();
+    this.closePromise = (async () => {
+      for (const run of this.runs.values()) run.controller.abort();
+      await Promise.allSettled([...this.runs.values()].map(run => run.promise));
+      if (this.flushTimer) clearTimeout(this.flushTimer);
+      await this.flush();
+    })();
+    return this.closePromise;
   }
 }
 

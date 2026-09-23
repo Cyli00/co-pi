@@ -44,7 +44,7 @@ export class Mailbox {
       if (this.closed) return;
       session.setActiveToolsByName(this.activeTools);
       onQueue = session.subscribe(event => {
-        if (event.type === "queue_update" && [...event.steering, ...event.followUp].some(text => text.includes(`[cpi-message:${command.id}]`))) queued = true;
+        if (event.type === "queue_update" && [...event.steering, ...event.followUp].some(text => text.startsWith(`[cpi-message:${command.id}]\n`))) queued = true;
       });
       await session.prompt(`[cpi-message:${command.id}]\n${command.text}\nSubmit a fresh handoff after addressing this update.`, {
       expandPromptTemplates: false, source: "rpc", streamingBehavior: command.mode,
@@ -70,7 +70,7 @@ export class Mailbox {
     const content = event.message.content;
     const text = typeof content === "string" ? content : content.filter(c => c.type === "text").map(c => c.text).join("\n");
     for (const command of this.pending.values()) {
-      if (text.includes(`[cpi-message:${command.id}]`)) {
+      if (text.startsWith(`[cpi-message:${command.id}]\n`)) {
         this.receipt(command, "delivered"); this.pending.delete(command.id);
       }
     }

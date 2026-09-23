@@ -81,10 +81,10 @@ export class Telemetry {
         this.activity(`tool-${event.toolCallId}`, "tool_start", `${event.toolName} ${JSON.stringify(event.args)}`, true);
         changed = false; break;
       case "tool_execution_update": case "tool_execution_end": {
-        const body = (event.type === "tool_execution_update" ? event.partialResult : event.result) as { content?: { type: string; text?: string }[] };
+        const body = (event.type === "tool_execution_update" ? event.partialResult : event.result) as { content?: { type: string; text?: string }[]; details?: { permissionDenied?: boolean } };
         const output = body.content?.filter(c => c.type === "text").map(c => c.text ?? "").join("\n") ?? "";
         const final = event.type === "tool_execution_end";
-        this.activity(`output-${event.toolCallId}`, final ? (event.isError ? "tool_error" : "tool_end") : "tool_update", `${event.toolName}\n${output}`, final);
+        this.activity(`output-${event.toolCallId}`, final ? (event.isError ? "tool_error" : body.details?.permissionDenied ? "tool_denied" : "tool_end") : "tool_update", `${event.toolName}\n${output}`, final);
         changed = false; break;
       }
       default: changed = false;

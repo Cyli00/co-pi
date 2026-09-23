@@ -6,7 +6,7 @@ import { WINDOWS_SHELL } from '../dist/platform.js';
 export const platformSettings = process.platform === 'win32' ? { shellPath: WINDOWS_SHELL } : {};
 
 export function temporary(t, dispose = async () => {}) {
-  const base = process.platform === 'win32' ? join(homedir(), 'AppData', 'Local', 'Temp', 'pi-subagents-tests') : join(tmpdir(), 'pi-subagents-tests');
+  const base = process.platform === 'win32' ? join(homedir(), 'AppData', 'Local', 'Temp', 'co-pi-tests') : join(tmpdir(), 'co-pi-tests');
   mkdirSync(base, { recursive: true });
   const directory = mkdtempSync(join(base, 'run-'));
   t.after(async () => {

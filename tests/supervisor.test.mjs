@@ -108,3 +108,63 @@ test('有 handoff 但没有 settled 的 worker 不算完成', async t => {
   const result = await supervisor.delegate(batch([task('one', 'unsettled')]));
   assert.equal(result.tasks[0].error, 'worker_not_settled');
 });
+
+test('历史终态只落盘一次，后续批次和关闭不重写历史', async t => {
+  const { supervisor, batch } = setup(t);
+  const write = supervisor.store.write.bind(supervisor.store);
+  const writes = [];
+  supervisor.store.write = async snapshot => { writes.push({ id: snapshot.batchId, closed: snapshot.closed }); await write(snapshot); };
+  const first = await supervisor.delegate(batch([task('one')], 'first'));
+  const count = writes.filter(w => w.id === 'first').length;
+  assert.equal(writes.filter(w => w.id === 'first' && w.closed).length, 1);
+  await supervisor.delegate(batch([task('two')], 'second'));
+  await supervisor.close();
+  assert.equal(writes.filter(w => w.id === 'first').length, count);
+  assert.deepEqual(supervisor.readHandoff('first'), first);
+});
+
+test('交接和下一批启动等待终态落盘', async t => {
+  const { root, supervisor, batch } = setup(t);
+  const write = supervisor.store.write.bind(supervisor.store);
+  let release, reached;
+  const gate = new Promise(resolve => { release = resolve; });
+  const writing = new Promise(resolve => { reached = resolve; });
+  supervisor.store.write = async snapshot => {
+    if (snapshot.closed) { reached(); await gate; }
+    await write(snapshot);
+  };
+  let returned = false;
+  const running = supervisor.delegate(batch([task('one')])).then(result => { returned = true; return result; });
+  await writing;
+  try {
+    assert.equal(returned, false);
+    assert.throws(() => supervisor.readHandoff('batch'), /handoff_not_ready/);
+    await assert.rejects(supervisor.delegate(batch([task('two')], 'second')), /batch_already_active/);
+  } finally { release(); }
+  await running;
+  assert.equal(readSnapshots(join(root, 'state'))[0].closed, true);
+});
+
+test('正在写入旧快照时收到终态，必须继续落盘最新版本', async t => {
+  const { root, supervisor, batch } = setup(t);
+  const write = supervisor.store.write.bind(supervisor.store);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const writes = [];
+  supervisor.store.write = async snapshot => {
+    const copy = structuredClone(snapshot);
+    writes.push(copy);
+    if (writes.length === 1) await gate;
+    await write(copy);
+  };
+  const completed = waitFor(supervisor, 'progress', s => s.tasks[0].phase === 'completed');
+  const running = supervisor.delegate(batch([task('one', 'slow')]));
+  try { await completed; } finally { release(); }
+  const result = await running;
+  assert.equal(result.tasks[0].status, 'completed');
+  assert.equal(writes[0].closed, false);
+  assert.equal(writes.at(-1).closed, true);
+  const final = readSnapshots(join(root, 'state'))[0];
+  assert.equal(final.tasks[0].phase, 'completed');
+  assert.equal(final.closed, true);
+});
