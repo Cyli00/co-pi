@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Birdview 生成的架构页面
+/.birdview/*.html

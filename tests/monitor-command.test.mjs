@@ -75,3 +75,17 @@ test('默认使用 npm 全局命令目录，预检不创建命令或修改配置
   assert.ok(probes.some(([command, args]) => command === 'npm' && args.join(' ') === 'prefix --global'));
   await assert.rejects(stat(prefix), { code: 'ENOENT' });
 });
+
+test('改名后识别旧安装器的启动脚本并更新，保留 cpi-monitor 命令', async t => {
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const root = temporary(t);
+    const plan = monitorCommandPlan({ platform, prefix: root, binDir: root, root, pathValue: root });
+    for (const file of plan.files) {
+      const old = file.content.replace('co-pi monitor launcher v1', 'codex-pi-subagents monitor launcher v1');
+      await writeFile(join(root, file.name), old);
+    }
+    await installMonitorCommand(plan);
+    for (const file of plan.files) assert.equal(await readFile(join(root, file.name), 'utf8'), file.content);
+    await installMonitorCommand(plan);
+  }
+});

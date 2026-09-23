@@ -14,7 +14,7 @@ const { values } = parseArgs({ options: {
   help: { type: "boolean" },
 } });
 if (values.help) {
-  console.log("pi-subagents：Codex MCP stdio 服务\n--state-dir <目录>  监控状态目录（默认 ~/.cpi/state）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--parallelism <1–4>  并发 worker 数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
+  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  监控状态目录（默认 ~/.cpi/state）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--parallelism <1–4>  并发 worker 数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
 } else {
   const timeout = Number(values["task-timeout-ms"]);
   if (!Number.isSafeInteger(timeout) || timeout < 100 || timeout > 86_400_000) throw new Error("task_timeout_invalid");

@@ -2,7 +2,8 @@ import { access, chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promis
 import { constants } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 
-const marker = 'codex-pi-subagents monitor launcher v1';
+const marker = 'co-pi monitor launcher v1';
+const acceptedMarkers = [marker, 'codex-pi-subagents monitor launcher v1'];
 const quoteSh = value => `'${value.replaceAll("'", "'\\''")}'`;
 const quoteCmd = value => `"${value.replaceAll('%', '%%')}"`;
 
@@ -31,7 +32,8 @@ export async function checkMonitorCommand(plan) {
     const path = join(plan.directory, file.name);
     const info = await existing(path);
     if (info && (!info.isFile() || info.isSymbolicLink()
-      || !(await readFile(path, 'utf8')).split(/\r?\n/).slice(0, 2).some(line => line === `# ${marker}` || line === `rem ${marker}`))) {
+      || !(await readFile(path, 'utf8')).split(/\r?\n/).slice(0, 2).some(line =>
+        acceptedMarkers.some(value => line === `# ${value}` || line === `rem ${value}`)))) {
       throw new Error('monitor_command_conflict');
     }
   }

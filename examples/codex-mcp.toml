@@ -1,5 +1,10 @@
 # 合并到需要接入的 Codex 配置；请调整仓库的绝对路径。
-[mcp_servers.pi_subagents]
+# 工作区外访问和未知执行范围使用 Codex 自动审批；可用 codex --approve-for-me 启动。
+# 对应全局设置（应放在任何 [表名] 之前；按已有配置合并）：
+# approval_policy = "on-request"
+# approvals_reviewer = "auto_review"
+# sandbox_mode = "workspace-write"
+[mcp_servers.co-pi]
 command = "node"
 args = ["E:/gitProjects/codex-subagents/dist/cli.js"]
 startup_timeout_sec = 20

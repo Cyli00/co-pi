@@ -1,13 +1,20 @@
 {
-  "name": "codex-pi-subagents",
-  "version": "0.1.0",
+  "name": "co-pi",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "面向 Codex 的 pi SDK 子代理与 pi-tui 监控器",
-  "engines": { "node": ">=22.19.0" },
-  "bin": { "pi-subagents": "dist/cli.js", "cpi-monitor": "dist/monitor-cli.js" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "co-pi": "dist/cli.js",
+    "pi-subagents": "dist/cli.js",
+    "cpi-monitor": "dist/monitor-cli.js"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/runtime-assets.mjs",
+    "package:runtime": "node scripts/package-runtime.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
     "monitor": "node dist/monitor-cli.js",
@@ -18,7 +25,12 @@
     "@earendil-works/pi-tui": "0.86.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "typebox": "1.3.27",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "web-tree-sitter": "0.26.13"
   },
-  "devDependencies": { "@types/node": "^22.19.19", "typescript": "5.9.3" }
+  "devDependencies": {
+    "tree-sitter-bash": "0.25.1",
+    "@types/node": "^22.19.19",
+    "typescript": "5.9.3"
+  }
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, readdir, access } from 'node:fs/promises';
+import { readFile, writeFile, readdir, mkdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -48,16 +48,16 @@ test('Windows 合并 shellPath、逐字备份已有配置，重复执行不新�
   assert.equal((await readdir(agentDir)).length, 2);
 });
 
-test('macOS/Linux 保留原 shell 与配置字节，不创建缺失的 pi 目录', async t => {
+test('macOS/Linux 不注册完整权限扩展，保留原 shell', async t => {
   for (const platform of ['darwin', 'linux']) {
     const root = temporary(t);
     const agentDir = join(root, 'not-created');
     await configurePi(await preflight({ platform, agentDir, runProbe: available }));
-    await assert.rejects(access(agentDir), { code: 'ENOENT' });
+    await assert.rejects(readFile(join(agentDir, 'settings.json')), { code: 'ENOENT' });
     const raw = '{ "shellPath": "/bin/zsh", "defaultModel": "kept" }\n';
     await writeFile(join(root, 'settings.json'), raw);
     await configurePi(await preflight({ platform, agentDir: root, runProbe: available }));
-    assert.equal(await readFile(join(root, 'settings.json'), 'utf8'), raw);
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'settings.json'), 'utf8')), { ...JSON.parse(raw) });
     await validateShell({ shellPath: '/bin/zsh' }, platform);
   }
 });
@@ -95,6 +95,50 @@ test('Windows 首次创建设置；检查后配置变化时不覆盖新值', asy
   assert.equal(await readFile(plan.path, 'utf8'), '{"defaultModel":"new-model"}');
 });
 
+test('迁移只移除旧安装器的包引用，保留独立扩展及原配置', async t => {
+  const agentDir = temporary(t);
+  const legacy = fileURLToPath(new URL('../node_modules/@gotgenes/pi-permission-system', import.meta.url));
+  const independent = 'npm:@gotgenes/pi-permission-system@30.0.0';
+  const settings = { packages: ['npm:unrelated', legacy, { source: legacy }, independent], defaultModel: 'kept' };
+  const raw = JSON.stringify(settings);
+  await writeFile(join(agentDir, 'settings.json'), raw);
+  const configDir = join(agentDir, 'extensions', 'pi-permission-system');
+  await mkdir(configDir, { recursive: true });
+  const config = '{ "permission": {"*":"deny"}, "yoloMode":true }\n';
+  await writeFile(join(configDir, 'config.json'), config);
+  const result = await configurePi(await preflight({ platform: 'linux', agentDir, runProbe: available }));
+  assert.equal(await readFile(result.backup, 'utf8'), raw);
+  assert.deepEqual(JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8')),
+    { ...settings, packages: ['npm:unrelated', independent] });
+  assert.equal(await readFile(join(configDir, 'config.json'), 'utf8'), config);
+  assert.deepEqual(await configurePi(await preflight({ platform: 'linux', agentDir, runProbe: available })), {});
+});
+
+test('配置目录链接支持预检、合并与备份，不替换链接目录', async t => {
+  const root = temporary(t), actual = join(root, 'real-agent'), agentDir = join(root, 'linked-agent');
+  await mkdir(actual);
+  await symlink(actual, agentDir, process.platform === 'win32' ? 'junction' : 'dir');
+  const raw = '{ "defaultModel": "kept", "shellPath": "old" }\n';
+  await writeFile(join(actual, 'settings.json'), raw);
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const plan = await preflight({ platform, agentDir, runProbe: available });
+    assert.equal(plan.raw, raw);
+  }
+  const result = await configurePi(await preflight({ platform: 'win32', agentDir, runProbe: available }));
+  assert.equal(await readFile(result.backup, 'utf8'), raw);
+  assert.deepEqual(JSON.parse(await readFile(join(actual, 'settings.json'), 'utf8')),
+    { defaultModel: 'kept', shellPath: WINDOWS_SHELL });
+  assert.deepEqual(await configurePi(await preflight({ platform: 'win32', agentDir, runProbe: available })), {});
+  const { lstat } = await import('node:fs/promises');
+  assert.ok((await lstat(agentDir)).isSymbolicLink());
+});
+
+test('配置文件自身不是普通文件时仍拒绝安装', async t => {
+  const agentDir = temporary(t);
+  await mkdir(join(agentDir, 'settings.json'));
+  await assert.rejects(preflight({ platform: 'linux', agentDir, runProbe: available }), /settings_not_regular_file/);
+});
+
 test('真实安装及平台入口 --check 可从其他目录调用，不写入含空格的临时配置路径', async t => {
   const root = temporary(t);
   const agentDir = join(root, 'pi settings');
@@ -110,6 +154,25 @@ test('真实安装及平台入口 --check 可从其他目录调用，不写入�
     assert.deepEqual(await readdir(root), []);
   }
   const config = mcpConfig('C:\\Test User\\pi', 'C:\\Project Folder', 'C:\\Program Files\\node.exe');
+  assert.ok(config.startsWith('[mcp_servers.co-pi]\n'));
   assert.ok(config.includes(JSON.stringify('C:\\Test User\\pi')));
   assert.ok(config.includes('tool_timeout_sec = 3900'));
+});
+
+test('pwsh 入口保留含空格及单引号的参数，预检不写文件并传回失败退出码', { skip: process.platform !== 'win32' }, async t => {
+  const probe = spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', windowsHide: true });
+  if (probe.error?.code === 'ENOENT') { t.skip('此环境未安装 PowerShell 7'); return; }
+  assert.equal(probe.status, 0, probe.stderr);
+  const root = temporary(t);
+  const agentDir = join(root, "pi user's settings");
+  const entry = fileURLToPath(new URL('../scripts/install-windows.ps1', import.meta.url));
+  const args = ['-NoProfile', '-File', entry, '--check', '--agent-dir', agentDir, '--bin-dir', join(root, 'command folder')];
+  const checked = spawnSync('pwsh', args, { cwd: root, encoding: 'utf8', windowsHide: true });
+  assert.equal(checked.status, 0, checked.stderr);
+  assert.ok(checked.stdout.includes(agentDir), checked.stdout);
+  assert.match(checked.stdout, /预检查完成，未修改文件/);
+  assert.deepEqual(await readdir(root), []);
+  const failed = spawnSync('pwsh', [...args, '--invalid-option'], { cwd: root, encoding: 'utf8', windowsHide: true });
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.deepEqual(await readdir(root), []);
 });

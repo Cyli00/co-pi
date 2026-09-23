@@ -5,12 +5,13 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { monitorCommandPlan, checkMonitorCommand, installMonitorCommand } from './monitor-command.mjs';
 
 // 引导脚本不依赖 node_modules 或 dist；运行时的对应常量由测试校验一致。
 export const WINDOWS_SHELL = 'C:\\Git\\bin\\bash.exe';
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const legacyPermissionPackage = join(projectDir, 'node_modules', '@gotgenes', 'pi-permission-system');
 
 function failure(code) { return new Error(code); }
 export function supportedNode(version) {
@@ -23,8 +24,8 @@ export function probe(command, args) {
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-export async function readSettings(agentDir) {
-  const path = join(agentDir, 'settings.json');
+export async function readSettings(agentDir, name = 'settings.json') {
+  const path = join(agentDir, name);
   let info;
   try { info = await lstat(path); }
   catch (error) { if (error.code === 'ENOENT') return { path, raw: undefined, settings: {} }; throw failure('settings_unreadable'); }
@@ -54,25 +55,38 @@ export async function preflight({ platform = process.platform, agentDir, binDir,
   const monitor = monitorCommandPlan({ platform, prefix, binDir, root: projectDir });
   await checkMonitorCommand(monitor);
   const uv = runProbe('uv', ['--version']);
-  return { platform, agentDir, monitor, uvAvailable: /^uv\s+\d+\./.test(uv ?? ''), ...await readSettings(agentDir) };
+  return { platform, agentDir, monitor, uvAvailable: /^uv\s+\d+\./.test(uv ?? ''),
+    ...await readSettings(agentDir) };
 }
 
 export async function configurePi(plan) {
-  if (plan.platform !== 'win32' || plan.settings.shellPath === WINDOWS_SHELL) return {};
+  const packages = plan.settings.packages ?? [];
+  if (!Array.isArray(packages)) throw failure('settings_invalid_json');
+  // 只迁移旧安装器注册的本项目路径，保留用户独立安装的扩展和配置。
+  const retained = packages.filter(entry => (typeof entry === 'string' ? entry : entry?.source) !== legacyPermissionPackage);
+  const settings = { ...plan.settings,
+    ...(retained.length !== packages.length ? { packages: retained } : {}),
+    ...(plan.platform === 'win32' ? { shellPath: WINDOWS_SHELL } : {}) };
+  if ((await readSettings(plan.agentDir)).raw !== plan.raw) throw failure('settings_changed_retry');
+  return saveSettings(plan.agentDir, 'settings.json', plan, settings);
+}
+
+async function saveSettings(agentDir, name, plan, settings) {
+  if (JSON.stringify(settings) === JSON.stringify(plan.settings)) return {};
   // 避免检查与写入之间覆盖用户新保存的设置；原文件备份不删除。
-  const current = await readSettings(plan.agentDir);
+  const current = await readSettings(agentDir, name);
   if (current.raw !== plan.raw) throw failure('settings_changed_retry');
-  await mkdir(plan.agentDir, { recursive: true });
+  await mkdir(dirname(plan.path), { recursive: true });
   const suffix = randomUUID();
   const backup = plan.raw === undefined ? undefined : `${plan.path}.cpi-backup-${suffix}`;
   if (backup) await writeFile(backup, plan.raw, { flag: 'wx', mode: 0o600 });
-  const output = `${JSON.stringify({ ...plan.settings, shellPath: WINDOWS_SHELL }, null, 2)}\n`;
+  const output = `${JSON.stringify(settings, null, 2)}\n`;
   if (plan.raw === undefined) {
     await writeFile(plan.path, output, { flag: 'wx', mode: 0o600 });
   } else {
     const staging = `${plan.path}.cpi-new-${suffix}`;
     await writeFile(staging, output, { flag: 'wx', mode: plan.mode ?? 0o600 });
-    const latest = await readSettings(plan.agentDir);
+    const latest = await readSettings(agentDir, name);
     if (latest.raw !== plan.raw) throw failure('settings_changed_retry');
     await rename(staging, plan.path);
   }
@@ -80,7 +94,7 @@ export async function configurePi(plan) {
 }
 
 export function mcpConfig(agentDir, root = projectDir, node = process.execPath) {
-  return `[mcp_servers.pi_subagents]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([join(root, 'dist', 'cli.js'), '--agent-dir', agentDir])}\nstartup_timeout_sec = 20\ntool_timeout_sec = 3900`;
+  return `[mcp_servers.co-pi]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([join(root, 'dist', 'cli.js'), '--agent-dir', agentDir])}\nstartup_timeout_sec = 20\ntool_timeout_sec = 3900`;
 }
 
 export async function install(plan, { build = buildProject, configure = configurePi, register = installMonitorCommand } = {}) {
@@ -89,10 +103,38 @@ export async function install(plan, { build = buildProject, configure = configur
   return { ...result, monitor: await register(plan.monitor) };
 }
 
-function buildProject(platform) {
-  const commands = platform === 'win32'
-    ? [[WINDOWS_SHELL, ['--noprofile', '--norc', '-c', 'npm ci && npm run build']]]
-    : [['npm', ['ci']], ['npm', ['run', 'build']]];
+export async function distributionMode(root = projectDir) {
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  if (manifest.cpiDistribution === undefined) return 'source';
+  if (manifest.cpiDistribution !== 'runtime') throw failure('distribution_invalid');
+  return 'runtime';
+}
+
+export async function validateRuntimeDistribution(root = projectDir) {
+  const vendor = join(root, 'dist/vendor/pi-permission-system');
+  try {
+    for (const file of ['dist/cli.js', 'dist/worker.js', 'dist/monitor-cli.js', 'npm-shrinkwrap.json',
+      'dist/vendor/pi-permission-system/LICENSE', 'dist/vendor/pi-permission-system/tree-sitter-bash.LICENSE']) {
+      if (!(await lstat(join(root, file))).isFile()) throw failure('runtime_assets_invalid');
+    }
+    const metadata = JSON.parse(await readFile(join(vendor, 'tree-sitter-bash.version.json'), 'utf8'));
+    const bytes = await readFile(join(vendor, 'tree-sitter-bash.wasm'));
+    if (metadata.package !== 'tree-sitter-bash' || !/^\d+\.\d+\.\d+$/.test(metadata.version)
+      || createHash('sha256').update(bytes).digest('hex') !== metadata.sha256) throw failure('runtime_assets_invalid');
+  } catch { throw failure('runtime_assets_invalid'); }
+}
+
+export function installationCommands(platform, mode) {
+  if (!['source', 'runtime'].includes(mode)) throw failure('distribution_invalid');
+  return platform === 'win32'
+    ? [[WINDOWS_SHELL, ['--noprofile', '--norc', '-c', mode === 'runtime' ? 'npm ci --omit=dev' : 'npm ci && npm run build']]]
+    : mode === 'runtime' ? [['npm', ['ci', '--omit=dev']]] : [['npm', ['ci']], ['npm', ['run', 'build']]];
+}
+
+async function buildProject(platform) {
+  const mode = await distributionMode();
+  if (mode === 'runtime') await validateRuntimeDistribution();
+  const commands = installationCommands(platform, mode);
   for (const [command, args] of commands) {
     const result = spawnSync(command, args, { cwd: projectDir, stdio: 'inherit', windowsHide: true });
     if (result.status !== 0) throw failure('build_failed');
@@ -110,6 +152,8 @@ const errors = {
   settings_invalid_json: 'pi settings.json 必须是合法 JSON 对象；原文件未覆盖。',
   settings_changed_retry: '检查期间 pi 设置已变化，请关闭配置编辑器后重试；原文件未覆盖。',
   build_failed: '依赖安装或编译失败，pi 设置尚未修改。修复以上构建错误后重试。',
+  distribution_invalid: '无法识别安装包类型，请重新取得源码或运行包。',
+  runtime_assets_invalid: '运行包缺失文件或 WASM 校验失败，请重新解压完整运行包；pi 设置尚未修改。',
   npm_prefix_unavailable: '无法确定 npm 全局命令目录；请用 --bin-dir 指定 PATH 中可写的目录。',
   monitor_command_conflict: '快捷命令目录已有非本安装器管理的 cpi-monitor，已停止，原命令未覆盖。请用 --bin-dir 选择其他 PATH 目录。',
   monitor_directory_unwritable: '快捷命令目录不可写。请用 --bin-dir 指定用户可写且在 PATH 中的目录，无需 sudo。',
@@ -125,6 +169,9 @@ export async function main(args = process.argv.slice(2)) {
   }
   if (values.platform && values.platform !== process.platform) throw failure('platform_mismatch');
   const plan = await preflight({ agentDir: resolve(values['agent-dir'] ?? join(homedir(), '.pi', 'agent')), binDir: values['bin-dir'] });
+  const mode = await distributionMode();
+  if (mode === 'runtime') await validateRuntimeDistribution();
+  console.log(mode === 'runtime' ? '安装类型：预编译运行包（仅安装运行依赖，无需 TypeScript 编译）。' : '安装类型：源码（安装开发依赖并编译）。');
   console.log(`平台：${plan.platform}\npi 设置：${plan.path}\nUV：${plan.uvAvailable ? '可用，将加入 uv run 指令' : '不可用，不加入 Python 执行指令'}`);
   if (plan.platform === 'win32') console.log(`Git Bash：已验证；${plan.settings.shellPath === WINDOWS_SHELL ? 'shellPath 已配置' : '安装时将合并 shellPath 并备份已有设置'}。`);
   if (!plan.settings.defaultProvider || !plan.settings.defaultModel) console.log('尚未配置 pi 默认模型：安装后请通过 pi /model 保存模型与 /thinking 保存思考强度。');
@@ -132,8 +179,9 @@ export async function main(args = process.argv.slice(2)) {
   if (values.check) { console.log('预检查完成，未修改文件。'); return; }
   const result = await install(plan);
   if (result.backup) console.log(`pi 设置备份：${result.backup}`);
+  console.log('内置权限模块已就绪：工作区内可确认的操作免审，外部路径和未知范围交给 Codex 自动审批；不安装或注册完整 pi-permission-system 扩展。');
   console.log(`已注册 cpi-monitor 快捷命令：${result.monitor.directory}。参数会原样传递，例如 cpi-monitor --state-dir <目录>。`);
-  console.log(`项目安装与平台配置完成。安全指令将在每个 worker 启动时自动注入。\n首次接入时，将以下内容合并到 Codex config.toml；已有同名配置时更新该表：\n\n${mcpConfig(plan.agentDir)}\n\n技能位置：${join(projectDir, '.agents', 'skills', 'pi-subagents')}\n在其他项目使用时，将该目录复制到目标项目的 .agents/skills/。\n监控命令：cpi-monitor
+  console.log(`项目安装与平台配置完成。安全指令将在每个 worker 启动时自动注入。\n首次接入时，将以下内容合并到 Codex config.toml；已有同名配置时更新该表：\n\n${mcpConfig(plan.agentDir)}\n\n技能位置：${join(projectDir, '.agents', 'skills', 'co-pi')}\n在其他项目使用时，将该目录复制到目标项目的 .agents/skills/。\n监控命令：cpi-monitor
 完整路径备用：node ${JSON.stringify(join(projectDir, 'dist', 'monitor-cli.js'))}\n模型、认证与思考强度的配置步骤见 README.md。`);
 }
 
