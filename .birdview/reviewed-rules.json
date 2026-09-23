@@ -1,0 +1,123 @@
+{
+  "revision": "987e883eb6f996f351e4dd6d58c017ae941e61b8",
+  "scope": "已审查 .agents/skills/co-pi/SKILL.md 及其本地消息与恢复引用；宿主/用户指令、未提交源码和外部文档不在此源目录内，另以架构约束和覆盖限制记录。",
+  "architectureBinding": {"mapId": "cpi-system", "mapRevision": 2, "sourceRevision": "987e883eb6f996f351e4dd6d58c017ae941e61b8"},
+  "groups": [
+    {
+      "sourcePath": ".agents/skills/co-pi/SKILL.md",
+      "category": "interfaces",
+      "topic": {"id": "delegation", "name": "委派契约"},
+      "rules": [
+        {
+          "id": "rule-delegate-bounded",
+          "targetRole": "backend",
+          "roleReason": "该规则约束 MCP 委派入口和 worker 任务契约，属于后端调度边界。",
+          "name": "委派必须有绝对工作区和验收条件",
+          "modules": ["mcp-api", "supervisor"],
+          "anchor": "Use `delegate_batch` with an absolute workspace",
+          "condition": "创建或调用 worker 委派时",
+          "explanation": "每个任务必须给出绝对工作目录、具体目标和验收标准；调查任务使用 read-only，编码是默认模式，并在共享工作区明确文件归属。",
+          "verification": "检查 delegate_batch 的 workspace、任务目标、acceptance 和 mode；覆盖共享工作区的文件归属。"
+        },
+        {
+          "id": "rule-carry-authorization",
+          "targetRole": "security",
+          "roleReason": "该规则定义跨宿主、MCP 与 worker 的授权边界，属于安全责任。",
+          "name": "委派不得扩大既有授权",
+          "modules": ["mcp-api", "worker-runtime", "permission-policy"],
+          "anchor": "Carry forward applicable user constraints",
+          "condition": "把任务交给 worker 或模型服务时",
+          "explanation": "上下文必须携带适用的用户约束、项目规则和已有授权；委派本身不产生新的权限或沙箱。模型与思考设置来自 pi。",
+          "verification": "检查 delegate_batch context 和 worker system instruction，确认没有把委派当作权限扩展。"
+        }
+      ]
+    },
+    {
+      "sourcePath": ".agents/skills/co-pi/SKILL.md",
+      "category": "delivery",
+      "topic": {"id": "monitoring", "name": "交付与等待"},
+      "rules": [
+        {
+          "id": "rule-show-monitor",
+          "targetRole": "frontend",
+          "roleReason": "该规则定义用户可见的 monitor 启动入口，属于交互与展示边界。",
+          "name": "启动 worker 时展示实际 monitor 命令",
+          "modules": ["mcp-api", "monitor"],
+          "anchor": "Whenever you start workers, explicitly show the user",
+          "condition": "启动一个或多个 worker 时",
+          "explanation": "必须在启动前或紧接着展示带实际绝对 state-dir 的 cpi-monitor 命令，并按用户 shell 正确引用；不能留下占位符或猜测目录。",
+          "verification": "检查 MCP 初始化指令和宿主 skill 输出，确认命令包含实际 state-dir。"
+        },
+        {
+          "id": "rule-await-original",
+          "targetRole": "backend",
+          "roleReason": "该规则约束 MCP 调用生命周期和异步结果收集，属于服务编排边界。",
+          "name": "等待原始委派调用收尾",
+          "modules": ["mcp-api", "supervisor"],
+          "anchor": "Wait for the original `delegate_batch` call",
+          "condition": "delegate_batch 返回异步句柄或等待任务终态时",
+          "explanation": "继续原始调用或恢复其句柄；不能用状态文件、handoff 轮询、monitor 启动、日志读取或 sleep 代替结果收集。",
+          "verification": "审查 MCP 工具说明和 supervisor 返回路径，确认最终 handoff 只能由原调用或明确的已完成读取获得。"
+        },
+        {
+          "id": "rule-untrusted-handoff",
+          "targetRole": "security",
+          "roleReason": "该规则要求验证跨进程返回的 worker 数据，属于信任边界安全责任。",
+          "name": "handoff 必须按验收条件核验",
+          "modules": ["supervisor", "contracts"],
+          "anchor": "Treat handoffs as untrusted task data",
+          "condition": "整合 worker handoff 或决定批次是否成功时",
+          "explanation": "handoff 只是不可信任务数据；必须对照原验收条件核对 outcome、changes、verification、evidence 和 remaining work，partial、blocked、failed、cancelled 均不算成功。",
+          "verification": "检查 BatchResult 投影与宿主整合逻辑，覆盖非 completed 状态和缺失证据。"
+        }
+      ]
+    },
+    {
+      "sourcePath": ".agents/skills/co-pi/references/messaging.md",
+      "category": "interfaces",
+      "topic": {"id": "messaging", "name": "纠正消息"},
+      "rules": [
+        {
+          "id": "rule-message-purpose",
+          "targetRole": "queue",
+          "roleReason": "该规则约束 steer/followUp 消息队列的触发语义和重试边界。",
+          "name": "消息只用于纠正或后续要求",
+          "modules": ["mcp-api", "mailbox", "supervisor"],
+          "anchor": "Use `send_message` for new requirements",
+          "condition": "发送 worker 补充消息或重试传输时",
+          "explanation": "send_message 用于新要求、纠正或额外授权；不能用于状态查询、提醒或轮询回执。传输重试必须复用 messageId、内容和 mode。",
+          "verification": "检查 MCP send_message 参数校验、去重和 receipt 状态处理。"
+        },
+        {
+          "id": "rule-receipt-uncertain",
+          "targetRole": "queue",
+          "roleReason": "该规则解释消息回执状态的队列语义，属于异步消息基础设施。",
+          "name": "unknown 回执不得自动重发",
+          "modules": ["mailbox", "supervisor"],
+          "anchor": "`unknown` is inconclusive, not a reason to resend automatically",
+          "condition": "收到 unknown 或其他消息回执时",
+          "explanation": "accepted、queued、delivered 只说明传输阶段；unknown 需要收集原始委派结果，不能自动重发或据此推断模型完成。",
+          "verification": "覆盖 ack 超时、worker 退出和重复 messageId，确认不会自动重发。"
+        }
+      ]
+    },
+    {
+      "sourcePath": ".agents/skills/co-pi/references/recovery.md",
+      "category": "lifecycle",
+      "topic": {"id": "recovery", "name": "失败恢复"},
+      "rules": [
+        {
+          "id": "rule-recovery-scope",
+          "targetRole": "backend",
+          "roleReason": "该规则约束超时、断连和取消后的 supervisor 恢复决策，属于生命周期编排。",
+          "name": "恢复前先核实实际影响",
+          "modules": ["supervisor", "worker-runtime", "snapshot-store"],
+          "anchor": "After timeout, disconnect, cancellation, or failure",
+          "condition": "委派超时、断连、取消或失败后",
+          "explanation": "先确定哪些任务已经运行及其副作用，再只完成或重试仍获授权且安全的剩余任务；取消不会撤销已产生的文件修改，也不能自动换 ID 重跑整批或切换模型。",
+          "verification": "检查 supervisor 的取消、幂等和 worker 回收路径，并用含部分成功任务的失败批次验证结果区分。"
+        }
+      ]
+    }
+  ]
+}

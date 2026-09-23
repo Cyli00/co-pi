@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "mapId": "cpi-system",
-  "revision": 1,
+  "revision": 2,
   "language": "zh",
   "project": {
-    "id": "codex-pi-subagents",
-    "name": "Codex Pi Subagents · 项目架构"
+    "id": "co-pi",
+    "name": "co-pi · 项目架构"
   },
   "modules": [
     {
@@ -22,7 +22,7 @@
           "note": "Codex MCP 接入配置样例；未在本次读取用户实际 Codex 配置。"
         },
         {
-          "path": ".agents/skills/pi-subagents/SKILL.md",
+          "path": ".agents/skills/co-pi/SKILL.md",
           "line": 10,
           "note": "约定等待原调用、不轮询状态、不通过日志接管 worker；是宿主指引而非强制 harness 改造。"
         }
@@ -41,7 +41,7 @@
       "name": "MCP 接入",
       "role": "backend",
       "kind": "local",
-      "responsibility": "stdio 三项工具；分离 progress、消息回执与最终 handoff。",
+      "responsibility": "stdio 三项工具；分离 progress、消息回执、权限 elicitation 与最终 handoff。",
       "ownership": [
         {
           "kind": "file",
@@ -55,7 +55,7 @@
       "evidence": [
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 10,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         },
         {
@@ -65,8 +65,13 @@
         },
         {
           "path": "src/mcp.ts",
-          "line": 31,
+          "line": 29,
           "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 47,
+          "note": "在原 delegate_batch 调用内把 worker 权限请求转为 MCP elicitation，并只接受带 auto_review 标记的批准。"
         }
       ],
       "status": "supported",
@@ -81,7 +86,7 @@
       "name": "批次与进程调度",
       "role": "backend",
       "kind": "local",
-      "responsibility": "幂等、并发与 IPC 路由；收尾、超时和进程回收。",
+      "responsibility": "幂等、并发、IPC 与权限审批路由；收尾、超时和进程回收。",
       "ownership": [
         {
           "kind": "file",
@@ -91,23 +96,28 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 68,
+          "line": 70,
           "note": "批次幂等与单批限制；绝对工作目录验证，默认并发 3。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 182,
+          "line": 184,
           "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 123,
+          "line": 125,
           "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 141,
+          "line": 143,
           "note": "消息 ID 去重、最多 128 条、等待回执与超时未知状态。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 205,
+          "note": "每个批次维护审批生命周期、最多 32 个并发审批，并将 permission_approval 转发给 Codex 回调。"
         }
       ],
       "status": "supported",
@@ -122,7 +132,7 @@
       "name": "pi SDK 执行器",
       "role": "backend",
       "kind": "local",
-      "responsibility": "每任务独立进程与内存会话；继承 pi 配置、执行工具并生成交接。",
+      "responsibility": "每任务独立进程与内存会话；继承 pi 配置、执行工具、应用权限策略并生成交接。",
       "ownership": [
         {
           "kind": "file",
@@ -136,28 +146,38 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 50,
+          "line": 62,
           "note": "services 先加载扩展和供应商，再选择模型；每任务使用内存 AgentSession。"
         },
         {
           "path": "src/settings.ts",
-          "line": 10,
+          "line": 11,
           "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
         },
         {
           "path": "src/worker.ts",
-          "line": 70,
+          "line": 91,
           "note": "编码模式继承 defaultTools/扩展工具，只读模式显式启用读工具及两项通信工具。"
         },
         {
           "path": "src/worker.ts",
-          "line": 107,
+          "line": 133,
           "note": "绑定 headless 扩展生命周期；这里 mode:rpc 是扩展上下文模式，不是 pi CLI RPC 传输。"
         },
         {
           "path": "src/worker.ts",
-          "line": 145,
+          "line": 174,
           "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 47,
+          "note": "每个 worker 固定创建工作区权限策略，并在内置工具、Bash 和扩展工具的执行入口检查。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 62,
+          "note": "过滤标准 pi-permission-system 扩展，避免 headless worker 与嵌入式策略重复审批。"
         }
       ],
       "status": "supported",
@@ -182,12 +202,12 @@
       "evidence": [
         {
           "path": "src/protocol.ts",
-          "line": 3,
+          "line": 4,
           "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
         },
         {
           "path": "src/protocol.ts",
-          "line": 139,
+          "line": 142,
           "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
         }
       ],
@@ -248,12 +268,12 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 128,
+          "line": 76,
           "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
         },
         {
           "path": "src/settings.ts",
-          "line": 10,
+          "line": 11,
           "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
         },
         {
@@ -336,7 +356,7 @@
         },
         {
           "path": "src/supervisor.ts",
-          "line": 333,
+          "line": 357,
           "note": "约 200ms 合并写入；写入失败取消任务并返回 storageError。"
         }
       ],
@@ -377,6 +397,151 @@
         "row": 2,
         "column": 2
       }
+    },
+    {
+      "id": "permission-policy",
+      "name": "工作区权限策略",
+      "role": "security",
+      "kind": "local",
+      "responsibility": "固定工作区基准，复用 pi 的工具/Bash gate 解析路径；已知工作区操作放行，外部路径与未知执行范围产生审批条件。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/permission-policy.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/permission-policy.ts",
+          "line": 25,
+          "note": "固定 @gotgenes/pi-permission-system 内部 gate 适配，并使用 pi SDK 路径转换。"
+        },
+        {
+          "path": "src/permission-policy.ts",
+          "line": 45,
+          "note": "构造固定内存 PermissionManager、ToolCallGatePipeline 和 BashProgram；关闭 YOLO 与基础设施读取豁免。"
+        },
+        {
+          "path": "src/permission-policy.ts",
+          "line": 84,
+          "note": "执行工具 gate、canonical 路径补查，并把 Git/解释器/复杂 shell/未知工具标为 unknown_execution 或 unknown_tool。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 1,
+        "column": 0
+      }
+    },
+    {
+      "id": "approval-bridge",
+      "name": "Codex 权限审批桥",
+      "role": "security",
+      "kind": "local",
+      "responsibility": "为工具调用生成一次性 permission_approval；等待批准、拒绝、取消或超时，并以同一请求 ID 返回决定。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "src/permission-approval.ts"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "src/permission-approval.ts",
+          "line": 7,
+          "note": "统一校验 Bash 与通用工具的审批动作和决定 schema。"
+        },
+        {
+          "path": "src/permission-approval.ts",
+          "line": 29,
+          "note": "维护 pending 请求、两分钟超时、取消和关闭时的拒绝；未批准的调用不会执行。"
+        },
+        {
+          "path": "src/permission-approval.ts",
+          "line": 70,
+          "note": "Bash 在执行前依据实际命令和工作目录请求审批，再调用本地操作。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 2,
+        "column": 3
+      }
+    },
+    {
+      "id": "installer",
+      "name": "跨平台安装与 pi 配置",
+      "role": "backend",
+      "kind": "local",
+      "responsibility": "检查环境、构建项目、注册本地 pi-permission-system 与配置、备份设置，并安装 cpi-monitor 入口。",
+      "ownership": [
+        {
+          "kind": "file",
+          "path": "scripts/install.mjs"
+        },
+        {
+          "kind": "file",
+          "path": "package.json"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "scripts/install.mjs",
+          "line": 13,
+          "note": "固定本地权限包路径、配置文件名和工作区放行/外部询问的默认配置。"
+        },
+        {
+          "path": "scripts/install.mjs",
+          "line": 52,
+          "note": "预检 Node、npm、Windows Git Bash、monitor 入口和 pi settings/权限配置。"
+        },
+        {
+          "path": "scripts/install.mjs",
+          "line": 74,
+          "note": "去重并注册权限包，写入权限配置，检测竞态并为已有普通文件生成备份。"
+        },
+        {
+          "path": "scripts/install.mjs",
+          "line": 121,
+          "note": "按平台构建、配置 pi 并安装 monitor 命令；不会替用户修改 Codex 配置。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": [],
+      "layout": {
+        "row": 3,
+        "column": 0
+      }
+    },
+    {
+      "id": "permission-engine",
+      "name": "pi-permission-system",
+      "role": "security",
+      "kind": "external",
+      "responsibility": "提供上游工具、Bash 语法和路径权限 gate；独立运行 pi 时作为带交互审批的标准扩展。",
+      "ownership": [],
+      "evidence": [
+        {
+          "path": "package.json",
+          "line": 24,
+          "note": "锁定 @gotgenes/pi-permission-system 33.0.5。"
+        },
+        {
+          "path": "README.md",
+          "line": 331,
+          "note": "记录 MCP worker 的工作区/外部/未知范围策略、固定内部 gate 适配与独立 pi 的标准扩展配置。"
+        }
+      ],
+      "status": "uncertain",
+      "openQuestions": [
+        "MCP worker 依赖上游未公开的内部 gate API；升级依赖后的兼容性必须重新通过边界测试。"
+      ],
+      "layout": {
+        "row": 3,
+        "column": 1
+      }
     }
   ],
   "relationships": [
@@ -390,7 +555,7 @@
       "evidence": [
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 10,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         },
         {
@@ -412,12 +577,12 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 123,
+          "line": 125,
           "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
         },
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 10,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         }
       ],
@@ -434,7 +599,7 @@
       "evidence": [
         {
           "path": "src/mcp.ts",
-          "line": 31,
+          "line": 29,
           "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
         }
       ],
@@ -451,7 +616,7 @@
       "evidence": [
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 10,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         }
       ],
@@ -468,7 +633,7 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 123,
+          "line": 125,
           "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
         }
       ],
@@ -485,12 +650,12 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 182,
+          "line": 184,
           "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 141,
+          "line": 143,
           "note": "消息 ID 去重、最多 128 条、等待回执与超时未知状态。"
         }
       ],
@@ -507,17 +672,17 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 81,
+          "line": 107,
           "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
         },
         {
           "path": "src/worker.ts",
-          "line": 145,
+          "line": 174,
           "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 182,
+          "line": 184,
           "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
         }
       ],
@@ -534,12 +699,12 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 81,
+          "line": 121,
           "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
         },
         {
           "path": "src/supervisor.ts",
-          "line": 182,
+          "line": 184,
           "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
         }
       ],
@@ -556,7 +721,7 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 95,
+          "line": 121,
           "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
         },
         {
@@ -612,7 +777,7 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 95,
+          "line": 121,
           "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
         }
       ],
@@ -634,7 +799,7 @@
         },
         {
           "path": "src/worker.ts",
-          "line": 95,
+          "line": 121,
           "note": "SDK 事件分发给 Telemetry 和 Mailbox，工具/输入事件使旧 handoff 失效。"
         }
       ],
@@ -651,7 +816,7 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 333,
+          "line": 357,
           "note": "约 200ms 合并写入；写入失败取消任务并返回 storageError。"
         }
       ],
@@ -690,7 +855,7 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 128,
+          "line": 76,
           "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
         }
       ],
@@ -707,7 +872,7 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 128,
+          "line": 76,
           "note": "模型请求、工具循环和重试由内嵌 pi SDK 执行，供应商由继承配置选定。"
         },
         {
@@ -729,12 +894,12 @@
       "evidence": [
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 10,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         },
         {
           "path": "src/protocol.ts",
-          "line": 3,
+          "line": 4,
           "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
         }
       ],
@@ -751,12 +916,12 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 182,
+          "line": 184,
           "note": "每个任务 fork 独立 Node worker，使用 IPC；默认 30 分钟超时及无响应回收。"
         },
         {
           "path": "src/protocol.ts",
-          "line": 3,
+          "line": 4,
           "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
         }
       ],
@@ -773,12 +938,12 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 81,
+          "line": 107,
           "note": "模型通过专用工具提交结构化 handoff；新输入或继续工作使旧交接失效。"
         },
         {
           "path": "src/protocol.ts",
-          "line": 139,
+          "line": 142,
           "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
         }
       ],
@@ -806,6 +971,191 @@
       ],
       "status": "supported",
       "openQuestions": []
+    },
+    {
+      "id": "worker-policy",
+      "from": "worker-runtime",
+      "to": "permission-policy",
+      "label": "工具执行前检查实际范围",
+      "kind": "control",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 47,
+          "note": "worker 为每个工作区创建策略，并把 normalized 工具输入送入 gate。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 52,
+          "note": "内置工具包装器在 execute 前取得审批条件；Bash 使用相同策略。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "policy-engine",
+      "from": "permission-policy",
+      "to": "permission-engine",
+      "label": "复用工具 / Bash / 路径 gate",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/permission-policy.ts",
+          "line": 39,
+          "note": "通过 Jiti 加载固定版本包的内部 gate 实现。"
+        },
+        {
+          "path": "package.json",
+          "line": 24,
+          "note": "包版本锁定为 33.0.5。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "worker-approval",
+      "from": "worker-runtime",
+      "to": "approval-bridge",
+      "label": "permission_approval / decision",
+      "kind": "control",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/worker.ts",
+          "line": 23,
+          "note": "worker 通过 IPC 发送权限请求，并在工具包装器和 Bash 执行前等待。"
+        },
+        {
+          "path": "src/permission-approval.ts",
+          "line": 38,
+          "note": "审批 gate 将决定绑定到一次性请求 ID，拒绝时抛出工具未执行错误。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "approval-supervisor",
+      "from": "approval-bridge",
+      "to": "supervisor",
+      "label": "IPC 权限请求与回传",
+      "kind": "event",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/protocol.ts",
+          "line": 118,
+          "note": "WorkerEvent / WorkerCommand 联合定义 permission_approval 与 permission_decision。"
+        },
+        {
+          "path": "src/supervisor.ts",
+          "line": 260,
+          "note": "supervisor 校验请求、限制并发、调用 reviewer 并以原 ID 返回决定。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "permission-review",
+      "from": "mcp-api",
+      "to": "codex-host",
+      "label": "MCP elicitation / 自动审批",
+      "kind": "request",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 47,
+          "note": "delegate_batch 内的 reviewer 使用 MCP elicitation 发送完整工具参数和 Codex 审批元数据。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 65,
+          "note": "请求设置超时并要求 auto_review 标记；普通表单 accept 不足以放行。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "permission-return",
+      "from": "codex-host",
+      "to": "mcp-api",
+      "label": "accept / decline / cancel",
+      "kind": "result",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "src/mcp.ts",
+          "line": 66,
+          "note": "MCP 只把带 approvals_reviewer=auto_review 的空表单 accept 视为批准，其余响应拒绝。"
+        }
+      ],
+      "status": "uncertain",
+      "openQuestions": [
+        "实际 Codex CLI 版本是否始终返回约定的自动审批元数据，需要在目标宿主上持续验收。"
+      ]
+    },
+    {
+      "id": "installer-policy",
+      "from": "installer",
+      "to": "permission-engine",
+      "label": "注册锁定版本包与标准配置",
+      "kind": "dependency",
+      "visibility": "overview",
+      "evidence": [
+        {
+          "path": "scripts/install.mjs",
+          "line": 74,
+          "note": "安装器在 pi packages 注册本地权限包，并写入 external_directory ask / bash ask 配置。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "installer-runtime",
+      "from": "installer",
+      "to": "worker-runtime",
+      "label": "构建产物与 pi 启动配置",
+      "kind": "control",
+      "visibility": "detail",
+      "evidence": [
+        {
+          "path": "scripts/install.mjs",
+          "line": 121,
+          "note": "安装器先构建项目，再配置 pi settings；worker 启动时读取该目录。"
+        },
+        {
+          "path": "src/settings.ts",
+          "line": 11,
+          "note": "worker 启动时重新读取并校验 pi settings。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
+    },
+    {
+      "id": "installer-monitor",
+      "from": "installer",
+      "to": "monitor",
+      "label": "注册 cpi-monitor 入口",
+      "kind": "control",
+      "visibility": "detail",
+      "evidence": [
+        {
+          "path": "scripts/install.mjs",
+          "line": 121,
+          "note": "安装器将编译后的 monitor CLI 注册到 npm 全局命令目录或指定可写 PATH 目录。"
+        }
+      ],
+      "status": "supported",
+      "openQuestions": []
     }
   ],
   "constraints": [
@@ -824,12 +1174,12 @@
       "evidence": [
         {
           "path": "src/settings.ts",
-          "line": 10,
+          "line": 11,
           "note": "全局 pi 设置加载为内存副本，校验默认模型及思考强度；Windows 指定 Git Bash。"
         },
         {
           "path": "src/worker.ts",
-          "line": 50,
+          "line": 62,
           "note": "services 先加载扩展和供应商，再选择模型；每任务使用内存 AgentSession。"
         }
       ],
@@ -850,16 +1200,79 @@
       "evidence": [
         {
           "path": "src/worker.ts",
-          "line": 70,
-          "note": "编码模式继承 defaultTools/扩展工具，只读模式显式启用读工具及两项通信工具。"
+          "line": 87,
+          "note": "编码模式保留内置文件工具和 Bash；只读模式显式启用读工具及两项通信工具。"
         },
         {
           "path": "src/protocol.ts",
-          "line": 3,
+          "line": 4,
           "note": "集中定义任务、批次、handoff、IPC、回执、运行状态与快照的类型/schema。"
         }
       ],
       "verification": "复核 taskSchema 默认模式及 coding/read-only 工具选择。"
+    },
+    {
+      "id": "permission-boundary",
+      "name": "工作区内已知操作免审，外部与未知范围必须走 Codex 自动审批",
+      "note": "来源：用户确认的首版策略。策略只覆盖工具执行入口；未知范围按保守路径交给 Codex，仍不构成操作系统沙箱。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "worker-runtime",
+        "permission-policy",
+        "approval-bridge",
+        "mcp-api",
+        "supervisor"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "src/permission-policy.ts",
+          "line": 84,
+          "note": "工具 gate 收集外部路径、未知工具和未知执行范围的审批条件。"
+        },
+        {
+          "path": "src/worker.ts",
+          "line": 52,
+          "note": "内置工具、扩展工具和 Bash 在执行入口等待 permission gate。"
+        },
+        {
+          "path": "src/mcp.ts",
+          "line": 52,
+          "note": "外部访问或未知范围通过原 delegate_batch 调用的 Codex elicitation 复核。"
+        }
+      ],
+      "verification": "运行内部工具无审批、外部 read/write/edit/Bash 的批准与拒绝测试；再检查 Git、解释器、复杂 shell 和扩展工具均进入未知范围。"
+    },
+    {
+      "id": "permission-installation",
+      "name": "一键安装必须为 pi 注册锁定版本权限包",
+      "note": "来源：用户明确要求把 pi-permission-system 纳入各平台一键安装；安装器必须保留既有设置并写入标准权限配置。",
+      "origin": "user",
+      "strength": "required",
+      "applicability": "applicable",
+      "scope": "modules",
+      "modules": [
+        "installer",
+        "permission-engine",
+        "worker-runtime"
+      ],
+      "relationships": [],
+      "evidence": [
+        {
+          "path": "scripts/install.mjs",
+          "line": 74,
+          "note": "安装器去重并注册本地锁定版本包，写入 extensions/pi-permission-system/config.json，并为已有文件备份。"
+        },
+        {
+          "path": "package.json",
+          "line": 24,
+          "note": "项目依赖锁定 @gotgenes/pi-permission-system 33.0.5。"
+        }
+      ],
+      "verification": "运行安装器单元测试覆盖三平台、重复安装、设置竞态、普通文件备份和权限配置；通过真实 SDK 测试确认 worker 不重复启用标准扩展。"
     },
     {
       "id": "readonly-monitor",
@@ -911,17 +1324,17 @@
       "evidence": [
         {
           "path": "src/supervisor.ts",
-          "line": 123,
+          "line": 125,
           "note": "最终工具结果仅含任务终态、handoff 和错误，不含执行事件。"
         },
         {
           "path": "src/mcp.ts",
-          "line": 31,
+          "line": 29,
           "note": "仅向订阅 progressToken 的客户端发合并通知，不保证进入 Astra 上下文。"
         },
         {
           "path": "src/worker.ts",
-          "line": 145,
+          "line": 174,
           "note": "交付前检查 settled、压缩、重试及队列；supervisor 还等待 worker 正常退出。"
         }
       ],
@@ -941,13 +1354,13 @@
       "relationships": [],
       "evidence": [
         {
-          "path": ".agents/skills/pi-subagents/SKILL.md",
-          "line": 10,
+          "path": ".agents/skills/co-pi/SKILL.md",
+          "line": 24,
           "note": "约定等待原调用、不轮询状态、不通过日志接管 worker；是宿主指引而非强制 harness 改造。"
         },
         {
           "path": "src/mcp.ts",
-          "line": 8,
+          "line": 12,
           "note": "注册委派、补充消息、读取已完成交接三项 MCP 工具。"
         }
       ],
@@ -966,7 +1379,7 @@
       "evidence": [
         {
           "path": "src/protocol.ts",
-          "line": 139,
+          "line": 142,
           "note": "去除终端控制字符并脱敏常见令牌；不是任意秘密识别器或 OS 沙箱。"
         },
         {
@@ -992,15 +1405,18 @@
     }
   ],
   "constraintDiscovery": {
-    "checkedAt": "2026-09-21T13:11:46.280Z",
+    "checkedAt": "2026-09-22T05:11:10.084Z",
     "checkedPaths": [
-      "AGENTS.md",
+      ".agents/skills/co-pi/SKILL.md",
+      ".agents/skills/co-pi/references/messaging.md",
+      ".agents/skills/co-pi/references/recovery.md",
       "src",
+      "scripts",
       "tests",
       "examples",
       "README.md",
       "package.json",
-      ".agents/skills/pi-subagents/SKILL.md"
+      ".birdview/architecture.json"
     ],
     "uninspectedPaths": [
       "node_modules",
