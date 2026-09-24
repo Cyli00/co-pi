@@ -75,6 +75,7 @@ test('实际运行包构建不带源码、调试文件或旧产物，包含技�
   await validateRuntimeDistribution(root);
   const files = await readdir(root, { recursive: true });
   assert.ok(files.includes('npm-shrinkwrap.json'));
+  assert.ok(files.some(file => file.replaceAll('\\', '/') === 'scripts/global-install.mjs'));
   for (const required of ['scripts/install.sh', '.agents/skills/co-pi/references/technical-reference.md',
     '.agents/skills/co-pi/references/maintenance-guide.md']) {
     assert.ok(files.some(file => file.replaceAll('\\', '/') === required), required);
