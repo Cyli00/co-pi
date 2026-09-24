@@ -1,8 +1,3 @@
 #!/usr/bin/env bash
 set -euo pipefail
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if ! command -v node >/dev/null 2>&1; then
-  printf '%s\n' '请先安装 Node.js ≥ 22.19.0，并加入 PATH。' >&2
-  exit 1
-fi
-exec node "$script_dir/install.mjs" --platform darwin "$@"
+exec bash "$(dirname -- "${BASH_SOURCE[0]}")/install.sh" --platform darwin "$@"
