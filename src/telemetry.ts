@@ -6,12 +6,13 @@ export class Telemetry {
   private sequence = 0;
   private assistantId = "";
   private thinkingId?: string;
+  private thinkingText = "";
   private pending = new Map<string, Extract<WorkerEvent, { type: "activity" }>>();
   private timer?: NodeJS.Timeout;
   constructor(private session: AgentSession, private send: (event: WorkerEvent) => unknown) {}
 
   private activity(id: string, kind: string, text: string, final = false) {
-    // 使用完整公开文本快照覆盖，避免累计工具输出重复和跨分片脱敏失效。
+    // 使用累计文本覆盖，避免重复输出和跨分片脱敏失效。
     this.pending.set(id, { type: "activity", id, kind, text: safeText(text), final });
     if (final) this.flush();
     else if (!this.timer) this.timer = setTimeout(() => this.flush(), 100);
@@ -30,16 +31,26 @@ export class Telemetry {
       contextTokens: context?.tokens ?? null, contextWindow: context?.contextWindow ?? null, contextPercent: context?.percent ?? null,
     } });
   }
+  private captureThinking(message: Extract<AgentSessionEvent, { type: "message_update" }>["message"]) {
+    if (message.role !== "assistant") return;
+    const blocks = message.content.filter(c => c.type === "thinking");
+    if (!blocks.length) return;
+    // 只使用 SDK 提供的可见文本，不读取签名或已屏蔽内容。
+    const text = safeText(blocks.filter(c => !c.redacted).map(c => c.thinking).join("\n"), 4_001);
+    this.thinkingText = text.length > 4_000 ? text.slice(0, 3_970) + "\n… 思考内容已截断" : text;
+    this.thinkingId = `thinking-${this.assistantId}`;
+    this.activity(this.thinkingId, "thinking_text", this.thinkingText);
+  }
   private finishThinking() {
     if (!this.thinkingId) return;
-    this.activity(this.thinkingId, "thinking", "思考阶段结束（不记录私有推理正文）", true);
+    this.activity(this.thinkingId, "thinking_text", this.thinkingText, true);
     this.thinkingId = undefined;
   }
   event(event: AgentSessionEvent) {
     let changed = true;
     switch (event.type) {
       case "agent_start": this.state.settled = false; break;
-      case "agent_settled": this.state.settled = true; this.metrics(); this.flush(); break;
+      case "agent_settled": this.finishThinking(); this.state.settled = true; this.metrics(); this.flush(); break;
       case "queue_update": this.state.queue = { steering: event.steering.length, followUp: event.followUp.length }; break;
       case "compaction_start":
         this.state.compacting = true; this.state.compactionReason = event.reason;
@@ -55,14 +66,10 @@ export class Telemetry {
         this.state.retry = undefined;
         this.send({ type: "activity", kind: "retry", text: event.type === "auto_retry_end" && !event.success ? "模型重试失败" : "重试阶段结束" }); break;
       case "message_start":
-        if (event.message.role === "assistant") this.assistantId = `assistant-${++this.sequence}`;
+        if (event.message.role === "assistant") { this.finishThinking(); this.assistantId = `assistant-${++this.sequence}`; this.thinkingText = ""; }
         changed = false; break;
       case "message_update":
-        if (["thinking_start", "thinking_delta"].includes(event.assistantMessageEvent.type) && !this.thinkingId) {
-          // 只采集阶段元数据，不读取 thinking 内容、签名或增量文本。
-          this.thinkingId = `thinking-${this.assistantId}`;
-          this.activity(this.thinkingId, "thinking", "正在思考（不记录私有推理正文）");
-        }
+        if (["thinking_start", "thinking_delta", "thinking_end"].includes(event.assistantMessageEvent.type)) this.captureThinking(event.message);
         if (event.assistantMessageEvent.type === "thinking_end") this.finishThinking();
         if (event.assistantMessageEvent.type === "text_delta" && event.message.role === "assistant") {
           this.finishThinking();
@@ -70,6 +77,7 @@ export class Telemetry {
         }
         changed = false; break;
       case "message_end":
+        this.captureThinking(event.message);
         this.finishThinking();
         if (event.message.role === "assistant") {
           const output = event.message.content.filter(c => c.type === "text").map(c => c.text).join("\n");

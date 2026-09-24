@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Supervisor } from '../dist/supervisor.js';
+import { MonitorStyle, renderFeed } from '../dist/monitor-view.js';
 import { inheritedSettings } from '../dist/settings.js';
 import { temporary, task, handoff, waitFor, platformSettings } from './helpers.mjs';
 
@@ -204,12 +205,12 @@ test('配置接受 max，同时拒绝非法模型专属强度', async t => {
   await assert.rejects(inheritedSettings(root), /pi_thinking_invalid/);
 });
 
-test('流式公开文本在完成前显示，私有思考不进入监控和 handoff', { timeout: 45_000 }, async t => {
+test('流式公开文本与 SDK 思考进入监控，思考默认折叠且不进入 handoff', { timeout: 45_000 }, async t => {
   const env = await setup(t, async (req, res, requests) => {
     if (requests.length > 1) return stream(res, {});
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const chunk = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: 'stream', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    chunk({ role: 'assistant', reasoning_content: 'PRIVATE_REASONING_SENTINEL', content: '公开文本第一段' });
+    chunk({ role: 'assistant', reasoning_content: 'SDK_REASONING_SENTINEL', content: '公开文本第一段' });
     await sleep(400);
     chunk({ content: '，第二段。' });
     await sleep(200);
@@ -223,7 +224,12 @@ test('流式公开文本在完成前显示，私有思考不进入监控和 hand
   const events = env.snapshots.at(-1).tasks[0].events;
   assert.equal(events.filter(e => e.text.startsWith('公开文本第一段')).length, 1);
   assert.ok(events.some(e => e.final && e.text === '公开文本第一段，第二段。'));
-  assert.ok(!JSON.stringify([env.snapshots, result]).includes('PRIVATE_REASONING_SENTINEL'));
+  assert.ok(events.some(e => e.kind === 'thinking_text' && e.final && e.text === 'SDK_REASONING_SENTINEL'));
+  assert.ok(!JSON.stringify(result).includes('SDK_REASONING_SENTINEL'));
+  const state = env.snapshots.at(-1).tasks[0];
+  const style = new MonitorStyle(false);
+  assert.doesNotMatch(renderFeed(state, 100, 'all', false, style).join(''), /SDK_REASONING_SENTINEL/);
+  assert.match(renderFeed(state, 100, 'all', true, style).join(''), /SDK_REASONING_SENTINEL/);
 });
 
 test('取消真实 SDK 会清空已排队 followUp，不再发起后续模型请求', { timeout: 45_000 }, async t => {

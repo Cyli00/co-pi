@@ -1,9 +1,12 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { normalizeThreadId, resolveStateThread } from "./state-thread.js";
 
-const CHUNK = 1024 * 1024;
-const MAX_LINE = 256 * 1024;
+const CHUNK = 64 * 1024;
+const MAX_META = 256 * 1024;
+const REFRESH_MS = 10_000;
+const decoder = new TextDecoder("utf-8", { fatal: true });
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 export interface CodexUsage {
   state: "searching" | "waiting" | "ready" | "unavailable";
@@ -12,48 +15,83 @@ export interface CodexUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
   updatedAt?: string;
+  workspace?: string;
+  workspaceSource?: "tasks" | "argument" | "cwd";
 }
 
 export function parseCodexUsage(line: string): Pick<CodexUsage, "inputTokens" | "cachedInputTokens" | "updatedAt"> | undefined {
   try {
-    const event = JSON.parse(line);
-    if (event?.type !== "event_msg" || event.payload?.type !== "token_count") return;
-    const usage = event.payload.info?.last_token_usage;
-    if (!usage || !Number.isSafeInteger(usage.input_tokens) || usage.input_tokens < 0
-      || !Number.isSafeInteger(usage.cached_input_tokens) || usage.cached_input_tokens < 0
-      || usage.cached_input_tokens > usage.input_tokens) return;
-    return { inputTokens: usage.input_tokens, cachedInputTokens: usage.cached_input_tokens,
-      updatedAt: typeof event.timestamp === "string" && Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : undefined };
+    return usageFromEvent(JSON.parse(line));
   } catch { return; }
 }
 
-const workspaceKey = (path: string) => {
-  const normalized = resolve(path).replace(/[\\/]+$/, "");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-};
+function usageFromEvent(event: any): Pick<CodexUsage, "inputTokens" | "cachedInputTokens" | "updatedAt"> | undefined {
+  if (event?.type !== "event_msg" || event.payload?.type !== "token_count") return;
+  const usage = event.payload.info?.last_token_usage;
+  if (!usage || !Number.isSafeInteger(usage.input_tokens) || usage.input_tokens < 0
+    || !Number.isSafeInteger(usage.cached_input_tokens) || usage.cached_input_tokens < 0
+    || usage.cached_input_tokens > usage.input_tokens) return;
+  return { inputTokens: usage.input_tokens, cachedInputTokens: usage.cached_input_tokens,
+    updatedAt: typeof event.timestamp === "string" && Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : undefined };
+}
+
+async function readMeta(handle: FileHandle) {
+  const parts: Buffer[] = [];
+  for (let position = 0; position < MAX_META; position += CHUNK) {
+    const buffer = Buffer.alloc(CHUNK);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    const end = buffer.subarray(0, bytesRead).indexOf(10);
+    parts.push(buffer.subarray(0, end < 0 ? bytesRead : end));
+    if (end >= 0) {
+      const event = JSON.parse(decoder.decode(Buffer.concat(parts)));
+      if (event?.type !== "session_meta" || typeof event.payload?.id !== "string" || !UUID.test(event.payload.id)) break;
+      return event.payload as { id: string; cwd?: string; source?: unknown };
+    }
+    if (bytesRead < CHUNK) break;
+  }
+  throw new Error("invalid_session");
+}
+
+async function* reverseLines(handle: FileHandle, size: number): AsyncGenerator<Buffer> {
+  let position = size;
+  let tail = true;
+  let parts: Buffer[] = [];
+  let length = 0;
+  while (position > 0) {
+    const count = Math.min(CHUNK, position);
+    position -= count;
+    const buffer = Buffer.alloc(count);
+    const { bytesRead } = await handle.read(buffer, 0, count, position);
+    if (bytesRead !== count) throw new Error("session_changed");
+    let end = count;
+    for (let newline = buffer.lastIndexOf(10, end - 1); newline >= 0; newline = end > 0 ? buffer.lastIndexOf(10, end - 1) : -1) {
+      if (tail) tail = false;
+      else {
+        const fragment = buffer.subarray(newline + 1, end);
+        yield parts.length ? Buffer.concat([fragment, ...parts.reverse()], fragment.length + length) : fragment;
+      }
+      parts = []; length = 0; end = newline;
+    }
+    // 未换行的尾部尚未提交；长记录按块暂存，避免反复拼接整段正文。
+    if (!tail && end > 0) { parts.push(buffer.subarray(0, end)); length += end; }
+  }
+  if (!tail && parts.length) yield Buffer.concat(parts.reverse(), length);
+}
 
 // 只保留用量和线程身份；日志正文不进入快照、MCP 返回值或监控时间线。
 export class CodexUsageReader {
   private value: CodexUsage;
   private file?: string;
   private nextSearch = 0;
-  private position = 0;
-  private historyEnd = 0;
-  private pending = Buffer.alloc(0);
-  private skipping = false;
-  private identity?: string;
   private signature?: string;
   private busy?: Promise<CodexUsage>;
   private readonly home: string;
-  private readonly workspace: string;
   private readonly threadId?: string;
 
   constructor(options: { home?: string; workspace?: string; threadId?: string } = {}) {
     this.home = options.home ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
-    this.workspace = workspaceKey(options.workspace ?? process.cwd());
-    this.threadId = options.threadId ?? process.env.CODEX_THREAD_ID;
-    if (this.threadId && !UUID.test(this.threadId)) throw new Error("codex_thread_id_invalid");
-    this.value = { state: "searching", automatic: !this.threadId, threadId: this.threadId };
+    this.threadId = normalizeThreadId(options.threadId ?? process.env.CODEX_THREAD_ID);
+    this.value = { state: "searching", automatic: false, threadId: this.threadId };
   }
 
   read(): Promise<CodexUsage> {
@@ -61,65 +99,41 @@ export class CodexUsageReader {
   }
 
   private async discover(): Promise<void> {
-    const candidates: { path: string; mtime: number }[] = [];
-    const walk = async (directory: string, depth: number): Promise<void> => {
+    if (!this.threadId) return;
+    const candidates: string[] = [];
+    const walk = async (directory: string): Promise<void> => {
       let entries;
-      try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+      try { entries = await readdir(directory, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
       for (const entry of entries) {
         const path = join(directory, entry.name);
-        if (entry.isDirectory() && depth < 3 && /^\d{2,4}$/.test(entry.name)) await walk(path, depth + 1);
+        if (entry.isDirectory()) await walk(path);
         if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
-        if (this.threadId && !entry.name.endsWith(`-${this.threadId}.jsonl`)) continue;
-        try { candidates.push({ path, mtime: (await stat(path)).mtimeMs }); } catch { /* 文件可能正在移走。 */ }
+        if (entry.name.toLowerCase().endsWith(`-${this.threadId}.jsonl`)) candidates.push(path);
       }
     };
-    await walk(join(this.home, "sessions"), 0);
-    candidates.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path));
-    for (const candidate of candidates) {
-      const handle = await open(candidate.path, "r").catch(() => undefined);
-      if (!handle) continue;
-      try {
-        const buffer = Buffer.alloc(MAX_LINE);
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-        const end = buffer.subarray(0, bytesRead).indexOf(10);
-        if (end < 0) continue;
-        const event = JSON.parse(buffer.subarray(0, end).toString("utf8"));
-        const meta = event?.payload;
-        if (event?.type !== "session_meta" || typeof meta?.id !== "string" || !UUID.test(meta.id)) continue;
-        if (this.threadId ? meta.id !== this.threadId : typeof meta.cwd !== "string" || workspaceKey(meta.cwd) !== this.workspace) continue;
-        // Codex 子线程的 source 为对象，不能把它当作主线程。
-        if (!["cli", "vscode", "exec"].includes(meta.source)) continue;
-        this.file = candidate.path;
-        this.value = { state: "waiting", automatic: !this.threadId, threadId: meta.id };
-        return;
-      } catch { /* 不支持或损坏的元数据不影响任务监控。 */ }
-      finally { await handle.close(); }
-    }
+    await walk(join(this.home, "sessions"));
+    await walk(join(this.home, "archived_sessions"));
+    if (candidates.length === 1) { this.select(candidates[0]!, this.threadId); return; }
+    this.file = undefined;
+    this.signature = undefined;
+    this.value = { state: candidates.length ? "unavailable" : "searching", automatic: false, threadId: this.threadId };
   }
 
-  private consume(buffer: Buffer, skipFirst: boolean, preserveTail: boolean): boolean {
-    let start = 0;
-    let found = false;
-    let skip = skipFirst;
-    for (let end = buffer.indexOf(10); end >= 0; end = buffer.indexOf(10, start)) {
-      if (!skip && end - start <= MAX_LINE) {
-        const usage = parseCodexUsage(buffer.subarray(start, end).toString("utf8"));
-        if (usage) { this.value = { ...this.value, ...usage, state: "ready" }; found = true; }
-      }
-      skip = false;
-      start = end + 1;
-    }
-    if (preserveTail) {
-      this.skipping = skip || buffer.length - start > MAX_LINE;
-      this.pending = this.skipping ? Buffer.alloc(0) : Buffer.from(buffer.subarray(start));
-    }
-    return found;
+  private select(file: string, threadId: string) {
+    if (file === this.file && threadId === this.value.threadId) return;
+    this.file = file;
+    this.signature = undefined;
+    this.value = { state: "waiting", automatic: false, threadId };
   }
 
   private async refresh(): Promise<CodexUsage> {
     try {
-      if (!this.file && Date.now() >= this.nextSearch) {
-        this.nextSearch = Date.now() + 5_000;
+      if (Date.now() >= this.nextSearch) {
+        this.nextSearch = Date.now() + REFRESH_MS;
         await this.discover();
       }
       if (!this.file) return { ...this.value };
@@ -127,32 +141,68 @@ export class CodexUsageReader {
       try {
         const info = await handle.stat({ bigint: true });
         const size = Number(info.size);
-        const identity = `${info.dev}/${info.ino}/${info.birthtimeNs}`;
-        const signature = `${info.mtimeNs}/${info.ctimeNs}`;
-        if (identity !== this.identity || size < this.position || (size === this.position && signature !== this.signature)) {
-          this.position = Math.max(0, size - CHUNK);
-          this.historyEnd = this.position;
-          this.pending = Buffer.alloc(0);
-          this.skipping = this.position > 0;
-          this.value = { state: "waiting", automatic: this.value.automatic, threadId: this.value.threadId };
+        const signature = `${info.dev}/${info.ino}/${info.birthtimeNs}/${size}/${info.mtimeNs}/${info.ctimeNs}`;
+        if (signature === this.signature) return { ...this.value };
+        this.signature = undefined;
+        const meta = await readMeta(handle);
+        if (meta.id.toLowerCase() !== this.value.threadId) throw new Error("thread_mismatch");
+        this.value = { state: "waiting", automatic: false, threadId: meta.id.toLowerCase() };
+        // 固定本次文件长度，从尾部找最新完整事件；无效的最新用量不能被旧值掩盖。
+        for await (const line of reverseLines(handle, size)) {
+          const text = decoder.decode(line).trim();
+          if (!text) continue;
+          const event = JSON.parse(text);
+          if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("invalid_record");
+          if (event.type !== "event_msg" || event.payload?.type !== "token_count") continue;
+          const usage = usageFromEvent(event);
+          this.value = usage ? { ...this.value, ...usage, state: "ready" } : { ...this.value, state: "unavailable" };
+          break;
         }
-        this.identity = identity;
         this.signature = signature;
-        const buffer = Buffer.alloc(Math.min(CHUNK, size - this.position));
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, this.position);
-        this.position += bytesRead;
-        if (bytesRead) this.consume(Buffer.concat([this.pending, buffer.subarray(0, bytesRead)]), this.skipping, true);
-        // 首次从尾部读取；若尾部全是长工具输出，每轮再向前查找一块，不阻塞 TUI。
-        if (this.value.inputTokens === undefined && this.historyEnd > 0) {
-          const start = Math.max(0, this.historyEnd - CHUNK);
-          const older = Buffer.alloc(this.historyEnd - start + Math.min(MAX_LINE, size - this.historyEnd));
-          const { bytesRead: count } = await handle.read(older, 0, older.length, start);
-          this.consume(older.subarray(0, count), start > 0, false);
-          this.historyEnd = start;
-        }
-        if (this.value.state === "unavailable") this.value.state = this.value.inputTokens === undefined ? "waiting" : "ready";
       } finally { await handle.close(); }
-    } catch { this.value = { ...this.value, state: "unavailable" }; }
+    } catch {
+      this.signature = undefined;
+      this.value = { state: "unavailable", automatic: false, threadId: this.value.threadId };
+    }
+    return { ...this.value };
+  }
+}
+
+export class MonitorUsageReader {
+  private threadId: string | undefined;
+  private reader: CodexUsageReader;
+  private value?: CodexUsage;
+  private nextRefresh = 0;
+
+  constructor(private readonly options: { home?: string; workspace?: string; threadId?: string; stateDir?: string } = {}) {
+    this.threadId = this.resolveThread();
+    this.reader = this.createReader();
+  }
+
+  private createReader() {
+    return new CodexUsageReader({ home: this.options.home, threadId: this.threadId ?? "" });
+  }
+
+  private resolveThread() {
+    const bound = this.options.stateDir ? resolveStateThread(this.options.stateDir, this.options.threadId) : normalizeThreadId(this.options.threadId);
+    return bound ?? normalizeThreadId(this.options.threadId ?? process.env.CODEX_THREAD_ID);
+  }
+
+  async read(_snapshots: readonly { workspace: string }[] = []): Promise<CodexUsage> {
+    if (this.value && Date.now() < this.nextRefresh) return { ...this.value };
+    try {
+      const threadId = this.resolveThread();
+      // 允许先打开 monitor 等服务建立绑定；一旦选定，目录变化不能悄悄换线程。
+      if (threadId !== this.threadId) {
+        if (this.threadId) throw new Error("state_thread_conflict");
+        this.threadId = threadId;
+        this.reader = this.createReader();
+      }
+      this.value = await this.reader.read();
+    } catch {
+      this.value = { state: "unavailable", automatic: false, threadId: this.threadId };
+    }
+    this.nextRefresh = Date.now() + REFRESH_MS;
     return { ...this.value };
   }
 }

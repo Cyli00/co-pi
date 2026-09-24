@@ -10,11 +10,13 @@ import {
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
 import { StateStore } from "./store.js";
+import { bindStateThread } from "./state-thread.js";
 import { isSettled } from "./handoff-contract.js";
 import { permissionActionSchema, permissionDecisionSchema, type PermissionReviewer } from "./permission-approval.js";
 
 export interface SupervisorOptions {
   stateDir: string;
+  threadId?: string;
   agentDir: string;
   parallelism?: number;
   taskTimeoutMs?: number;
@@ -67,6 +69,7 @@ export class Supervisor extends EventEmitter {
   constructor(readonly options: SupervisorOptions) {
     super();
     if (!Number.isInteger(options.parallelism ?? 3) || (options.parallelism ?? 3) < 1 || (options.parallelism ?? 3) > 4) throw new CpiError("parallelism_invalid");
+    options.threadId = bindStateThread(options.stateDir, options.threadId);
     this.store = new StateStore(options.stateDir);
     this.heartbeat = setInterval(() => {
       for (const run of this.runs.values()) if (!run.snapshot.closed) {

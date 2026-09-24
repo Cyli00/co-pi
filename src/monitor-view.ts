@@ -1,5 +1,5 @@
 import { Markdown, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { safeText, type Activity, type TaskState } from "./protocol.js";
+import { isTerminal, safeText, type Activity, type TaskState } from "./protocol.js";
 
 export type FeedFilter = "all" | "stages" | "tools" | "text" | "handoff";
 export const filters: { id: FeedFilter; label: string }[] = [
@@ -12,11 +12,15 @@ const colors = { text: "125;180;232", stages: "133;199;175", tools: "216;178;110
 export type Tone = keyof typeof colors;
 export const plainLine = (value: unknown, limit = 4_000) => safeText(value, limit).replace(/\s+/g, " ").trim();
 export class MonitorStyle {
+  private readonly markdownCache = new Map<string, string[]>();
   constructor(readonly color: boolean) {}
   paint(tone: Tone, text: string, bold = false): string {
     return this.color ? `\x1b[${bold ? "1;" : ""}38;2;${colors[tone]}m${text}\x1b[0m` : text;
   }
   markdown(text: string, width: number): string[] {
+    const key = `${width}/${text}`;
+    const cached = this.markdownCache.get(key);
+    if (cached) return [...cached];
     const theme: MarkdownTheme = {
       heading: s => this.paint("text", s, true), link: s => this.paint("text", s), linkUrl: s => this.paint("muted", s),
       code: s => this.paint("tools", s), codeBlock: s => this.paint("tools", s), codeBlockBorder: s => this.paint("muted", s),
@@ -24,7 +28,10 @@ export class MonitorStyle {
       listBullet: s => this.paint("text", s), bold: s => this.paint("text", s, true), italic: s => s,
       strikethrough: s => s, underline: s => s,
     };
-    return new Markdown(safeText(text, 32_000), 0, 0, theme).render(Math.max(1, width));
+    const lines = new Markdown(safeText(text, 32_000), 0, 0, theme).render(Math.max(1, width));
+    if (this.markdownCache.size >= 256) this.markdownCache.delete(this.markdownCache.keys().next().value!);
+    this.markdownCache.set(key, lines);
+    return [...lines];
   }
 }
 
@@ -40,8 +47,19 @@ const stageLabels: Record<string, string> = {
   thinking: "思考", progress: "进展", compaction: "上下文压缩", retry: "重试", runtime: "运行状态", diagnostic: "提示", message: "消息",
 };
 
+export interface FeedAnchor { key: string; row: number }
+export interface FeedLayout { lines: string[]; anchors: FeedAnchor[] }
+
 export function renderFeed(state: TaskState, width: number, filter: FeedFilter, expanded: boolean, style: MonitorStyle): string[] {
+  return renderFeedLayout(state, width, filter, expanded, style).lines;
+}
+
+export function renderFeedLayout(state: TaskState, width: number, filter: FeedFilter, expanded: boolean, style: MonitorStyle): FeedLayout {
   const lines: string[] = [];
+  const anchors: FeedAnchor[] = [];
+  const mark = (key: string, start: number) => {
+    for (let i = start; i < lines.length; i++) anchors[i] = { key, row: i - start };
+  };
   const inner = Math.max(1, width - 3);
   const wrap = (text: string) => safeText(text, 32_000).split("\n").flatMap(line => wrapTextWithAnsi(line, inner));
   const card = (tone: Tone, title: string, body: string[], footer?: string) => {
@@ -51,6 +69,8 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
     lines.push(style.paint(tone, "╰─"), "");
   };
   if (state.omittedEvents) lines.push(style.paint("muted", `更早的 ${state.omittedEvents} 条事件已移出监控缓存`), "");
+  mark("omitted", 0);
+  const noticeLength = lines.length;
   const outputs = new Map(state.events.filter(e => e.id?.startsWith("output-")).map(e => [e.id!.slice(7), e]));
   const paired = new Set<string>();
   for (const event of state.events) {
@@ -63,8 +83,13 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
     if (filter !== "all" && filter !== kind) continue;
     if (event.kind.startsWith("tool_") && communicationTool(event)) continue;
     if (event.kind === "handoff" && state.handoff) continue;
+    const start = lines.length;
     const time = event.at.slice(11, 19);
-    if (kind === "tools" && event.kind !== "tool") {
+    if (event.kind === "thinking_text") {
+      const status = event.final === false ? "正在思考" : "思考结束";
+      if (expanded) card("stages", `思考 · ${status}  ${time} · t 收起`, style.markdown(event.text || "模型未提供可显示的思考文本。", inner));
+      else lines.push(style.paint("stages", `▸ 思考 · ${status}  ${time} · t 展开`));
+    } else if (kind === "tools" && event.kind !== "tool") {
       const output = event.id?.startsWith("tool-") ? outputs.get(event.id.slice(5)) : event;
       const status = output?.kind === "tool_error" ? "失败" : output?.kind === "tool_denied" ? "未获批准" : output?.kind === "tool_end" ? "完成" : "执行中";
       const tone = status === "失败" ? "error" : "tools";
@@ -79,7 +104,7 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
         } catch { /* 历史或截断参数仍按原始公开文本显示。 */ }
         const rows = wrap(args);
         body.push(...(expanded ? rows : rows.slice(0, 2)).map(line => style.paint("muted", line)));
-        if (!expanded && rows.length > 2) body.push(style.paint("muted", `… 另有 ${rows.length - 2} 行参数 · e 展开`));
+        if (!expanded && rows.length > 2) body.push(style.paint("muted", `… 另有 ${rows.length - 2} 行参数 · t 展开`));
       }
       const text = output?.text.includes("\n") ? output.text.slice(output.text.indexOf("\n") + 1) : "";
       const rows = wrap(text);
@@ -88,7 +113,7 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
         body.push(...(expanded ? rows : rows.slice(0, 3)));
       } else body.push(style.paint("muted", status === "执行中" ? "等待工具输出…" : "无文本输出"));
       card(tone, `工具 · ${name} · ${status}  ${time}`, body,
-        !expanded && rows.length > 3 ? `… 另有 ${rows.length - 3} 行结果 · e 展开` : undefined);
+        !expanded && rows.length > 3 ? `… 另有 ${rows.length - 3} 行结果 · t 展开` : undefined);
     } else if (kind === "text") {
       card("text", `输出 · ${event.final === false ? "正在生成" : "公开文本"}  ${time}`, style.markdown(event.text, inner));
     } else {
@@ -96,13 +121,17 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
       const label = stageLabels[event.kind] ?? (kind === "tools" ? "工具" : "阶段");
       for (const line of wrap(`${label} · ${time}  ${event.text}`)) lines.push(style.paint(tone, `◆ ${line}`));
     }
+    mark(`event:${event.id ?? `${event.at}/${event.kind}/${event.text}`}`, start);
   }
   if (filter === "all" || filter === "stages") {
     for (const receipt of state.messages ?? []) {
+      const start = lines.length;
       lines.push(...wrap(`消息 ${receipt.id} · ${receipt.mode} · ${receipt.status}${receipt.error ? ` · ${receipt.error}` : ""}`).map(line => style.paint("muted", line)));
+      mark(`receipt:${receipt.id}`, start);
     }
   }
   if (state.handoff && (filter === "all" || filter === "handoff")) {
+    const start = lines.length;
     const handoff = state.handoff;
     const body = style.markdown(handoff.summary, inner);
     const section = (label: string, items: string[]) => {
@@ -118,7 +147,14 @@ export function renderFeed(state: TaskState, width: number, filter: FeedFilter, 
     section("下一步", handoff.nextSteps);
     const statusLabels = { completed: "完成", partial: "部分完成", blocked: "受阻" };
     card("handoff", `最终交接 · ${statusLabels[handoff.status]}`, body);
+    mark("handoff", start);
   }
-  if (!lines.length) lines.push(style.paint("muted", filter === "handoff" ? "交接尚未生成。任务结束后会在这里显示结论与验证。" : "暂无此类事件。"));
-  return lines;
+  if (lines.length === noticeLength) {
+    const status = state.phase === "failed" ? "任务失败" : state.phase === "cancelled" ? "任务已取消" : "任务已结束";
+    const empty = isTerminal(state.phase) ? `${status}，未生成交接。请切换到阶段查看记录${state.error ? `（${plainLine(state.error)}）` : ""}。`
+      : "交接尚未生成。任务结束后会在这里显示结论与验证。";
+    lines.push(...wrap(filter === "handoff" ? empty : "暂无此类事件。").map(line => style.paint("muted", line)));
+    mark("empty", noticeLength);
+  }
+  return { lines, anchors };
 }

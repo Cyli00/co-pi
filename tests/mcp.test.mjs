@@ -21,7 +21,7 @@ test('MCP 订阅进展与最终交接分层，未订阅也能交付', async t =>
   assert.equal(client.getServerVersion().name, 'co-pi');
   const instructions = client.getInstructions();
   assert.ok(instructions.includes(JSON.stringify(join(root, 'state'))));
-  assert.ok(instructions.includes('cpi-monitor --state-dir'));
+  assert.ok(instructions.includes('cpi-monitor --open --state-dir'));
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(t => t.name), ['delegate_batch', 'send_message', 'read_handoff']);
   assert.ok(!/\p{Script=Han}/u.test(instructions));
