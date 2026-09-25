@@ -139,14 +139,12 @@ test('配置文件自身不是普通文件时仍拒绝安装', async t => {
   await assert.rejects(preflight({ platform: 'linux', agentDir, runProbe: available }), /settings_not_regular_file/);
 });
 
-test('真实安装及平台入口 --check 可从其他目录调用，不写入含空格的临时配置路径', async t => {
+test('真实安装及统一 Bash 入口 --check 可从其他目录调用，不写入含空格的临时配置路径', async t => {
   const root = temporary(t);
   const agentDir = join(root, "pi user's settings");
-  const platformName = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const commands = [
     [process.execPath, [fileURLToPath(new URL('../scripts/install.mjs', import.meta.url))]],
     [process.platform === 'win32' ? WINDOWS_SHELL : '/bin/bash', ['--noprofile', '--norc', fileURLToPath(new URL('../scripts/install.sh', import.meta.url)).replaceAll('\\', '/')]],
-    [process.platform === 'win32' ? WINDOWS_SHELL : '/bin/bash', ['--noprofile', '--norc', fileURLToPath(new URL(`../scripts/install-${platformName}.sh`, import.meta.url)).replaceAll('\\', '/')]],
   ];
   for (const [command, args] of commands) {
     const result = spawnSync(command, [...args, '--check', '--agent-dir', agentDir, '--bin-dir', join(root, 'commands')], {
@@ -162,45 +160,33 @@ test('真实安装及平台入口 --check 可从其他目录调用，不写入�
   assert.ok(config.includes('tool_timeout_sec = 3900'));
 });
 
-test('旧平台入口继续校验操作系统，参数错误保留失败退出码', t => {
+test('统一 Bash 入口拒绝无效参数并返回失败退出码', t => {
   const root = temporary(t);
   const shell = process.platform === 'win32' ? WINDOWS_SHELL : '/bin/bash';
-  const other = process.platform === 'win32' ? 'linux' : 'windows';
-  const entry = fileURLToPath(new URL(`../scripts/install-${other}.sh`, import.meta.url)).replaceAll('\\', '/');
-  const mismatch = spawnSync(shell, ['--noprofile', '--norc', entry, '--check'], { cwd: root, encoding: 'utf8', windowsHide: true });
-  assert.equal(mismatch.status, 1);
-  assert.match(mismatch.stderr, /安装入口与当前操作系统不匹配/);
   const common = fileURLToPath(new URL('../scripts/install.sh', import.meta.url)).replaceAll('\\', '/');
   const invalid = spawnSync(shell, ['--noprofile', '--norc', common, '--invalid-option'], { cwd: root, encoding: 'utf8', windowsHide: true });
   assert.equal(invalid.status, 1);
 });
 
-test('统一入口与三个兼容入口原样转发参数和退出码，安装路径可含空格及单引号', async t => {
+test('统一 Bash 入口原样转发参数和退出码，安装路径可含空格及单引号', async t => {
   const root = temporary(t), scripts = join(root, "user's installation", 'scripts');
   await mkdir(scripts, { recursive: true });
-  for (const name of ['install.sh', 'install-windows.sh', 'install-macos.sh', 'install-linux.sh']) {
-    await copyFile(new URL(`../scripts/${name}`, import.meta.url), join(scripts, name));
-  }
+  await copyFile(new URL('../scripts/install.sh', import.meta.url), join(scripts, 'install.sh'));
   await writeFile(join(scripts, 'install.mjs'), 'console.log(JSON.stringify(process.argv.slice(2))); process.exitCode = 23;');
   const args = ['--agent-dir', "pi user's settings", '--bin-dir', '$(not-a-command)', '--check'];
-  for (const [name, prefix] of [
-    ['install.sh', []], ['install-windows.sh', ['--platform', 'win32']],
-    ['install-macos.sh', ['--platform', 'darwin']], ['install-linux.sh', ['--platform', 'linux']],
-  ]) {
-    const run = spawnSync(process.platform === 'win32' ? WINDOWS_SHELL : '/bin/bash',
-      ['--noprofile', '--norc', join(scripts, name).replaceAll('\\', '/'), ...args], { cwd: root, encoding: 'utf8', windowsHide: true });
-    assert.equal(run.status, 23, run.stderr);
-    assert.deepEqual(JSON.parse(run.stdout), [...prefix, ...args]);
-  }
+  const run = spawnSync(process.platform === 'win32' ? WINDOWS_SHELL : '/bin/bash',
+    ['--noprofile', '--norc', join(scripts, 'install.sh').replaceAll('\\', '/'), ...args], { cwd: root, encoding: 'utf8', windowsHide: true });
+  assert.equal(run.status, 23, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), args);
 });
 
-test('pwsh 入口保留含空格及单引号的参数，预检不写文件并传回失败退出码', { skip: process.platform !== 'win32' }, async t => {
+test('pwsh 统一入口保留含空格及单引号的参数，预检不写文件并传回失败退出码', { skip: process.platform !== 'win32' }, async t => {
   const probe = spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', windowsHide: true });
   if (probe.error?.code === 'ENOENT') { t.skip('此环境未安装 PowerShell 7'); return; }
   assert.equal(probe.status, 0, probe.stderr);
   const root = temporary(t);
   const agentDir = join(root, "pi user's settings");
-  const entry = fileURLToPath(new URL('../scripts/install-windows.ps1', import.meta.url));
+  const entry = fileURLToPath(new URL('../scripts/install.ps1', import.meta.url));
   const args = ['-NoProfile', '-File', entry, '--check', '--agent-dir', agentDir, '--bin-dir', join(root, 'command folder')];
   const checked = spawnSync('pwsh', args, { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, CODEX_HOME: join(root, 'codex') } });
   assert.equal(checked.status, 0, checked.stderr);
