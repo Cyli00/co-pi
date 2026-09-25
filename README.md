@@ -28,6 +28,8 @@ cd cpi-runtime-0.1.2
 bash scripts/install.sh
 ```
 
+Windows PowerShell 7 可在项目目录直接运行统一入口：`pwsh -NoProfile -File scripts/install.ps1`。Windows 安装仍需要 Git for Windows 位于 `C:\Git`；安装器会用其中的 Git Bash 执行 Windows 构建命令，pi worker 也使用该 shell。
+
 没有运行包时，按[源码安装](#获取项目与安装)取得项目，再执行相同安装命令。运行包由维护者本地构建，不假定已发布到 npm 或 GitHub Releases。
 
 ### 2. 配置 worker 模型
@@ -78,7 +80,7 @@ UV 可选。检测到 `uv --version` 可用时，worker 收到使用 `uv run` �
 
 | 平台 | 特别约定 |
 | --- | --- |
-| Windows | 使用 Windows 版 Node/npm。Bash 示例在 Git Bash 中执行；PowerShell 入口需要可选的 PowerShell 7，不支持 Windows PowerShell 5.1。worker 仍使用 Git Bash |
+| Windows | 使用 Windows 版 Node/npm。PowerShell 7 可直接启动统一安装器；Windows PowerShell 5.1 不支持。Git Bash 仍需安装到 `C:\Git`，供构建和 worker shell 使用 |
 | macOS | Node 需匹配 Apple Silicon / Intel。需要 Git 时可用 Apple Command Line Tools 或包管理器；保留 pi 原有 shell，无需 Windows 路径 |
 | Linux | 检查发行版提供的 Node 版本。使用版本管理器时先激活所需版本 |
 | WSL | 在同一发行版内按 Linux 流程安装并配置；使用 Linux 路径，不混用 Windows 的 Node、安装目录或凭据目录 |
@@ -108,23 +110,23 @@ bash scripts/install.sh
 
 ### 统一入口与参数
 
-三平台使用同一个入口，自动识别操作系统：
+三平台使用同一个 Node.js 安装器，按当前操作系统自动配置。macOS、Linux 和 Windows Git Bash 可运行：
 
 ```bash
 bash scripts/install.sh --check
 bash scripts/install.sh
 ```
 
+Windows PowerShell 7 可直接启动同一安装器，无需用 Git Bash 作为交互 shell：
+
+```powershell
+pwsh -NoProfile -File scripts/install.ps1 --check
+pwsh -NoProfile -File scripts/install.ps1
+```
+
+Windows 仍需将 Git for Windows 安装到 `C:\Git`；安装器会用其中的 Git Bash 执行 Windows 构建命令，pi worker 也使用该 shell。
+
 `--check` 只预检，可按需使用。也可直接运行 `node scripts/install.mjs`。支持从其他目录用绝对路径调用，路径可以包含空格。
-
-旧入口继续兼容，并校验所在操作系统：
-
-| 平台 | 兼容命令 |
-| --- | --- |
-| Windows Git Bash | `bash scripts/install-windows.sh` |
-| Windows PowerShell 7 | `pwsh -NoProfile -File scripts/install-windows.ps1` |
-| macOS | `bash scripts/install-macos.sh` |
-| Linux / WSL | `bash scripts/install-linux.sh` |
 
 | 参数 | 默认值 / 行为 |
 | --- | --- |

@@ -40,7 +40,7 @@ export async function stageRuntime(directory) {
   if (result.status !== 0) throw new Error('runtime_build_failed');
   await copyRuntimeAssets(join(directory, 'dist'));
   await mkdir(join(directory, 'scripts'), { recursive: true });
-  for (const file of ['install.mjs', 'install.sh', 'global-install.mjs', 'monitor-command.mjs', 'install-windows.sh', 'install-windows.ps1', 'install-linux.sh', 'install-macos.sh']) {
+  for (const file of ['install.mjs', 'install.sh', 'install.ps1', 'global-install.mjs', 'monitor-command.mjs']) {
     await cp(join(root, 'scripts', file), join(directory, 'scripts', file));
   }
   await cp(join(root, '.agents/skills/co-pi'), join(directory, '.agents/skills/co-pi'), { recursive: true });
