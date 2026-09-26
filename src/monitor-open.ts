@@ -5,7 +5,8 @@ import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { acquireMonitorInstance, canonicalStateDirectory, findMonitorInstance } from "./monitor-instance.js";
+import { acquireMonitorInstance, canonicalStateDirectory, findMonitorInstance, type InstanceLease } from "./monitor-instance.js";
+import { safeText } from "./protocol.js";
 import { WINDOWS_SHELL } from "./platform.js";
 
 export const quoteShell = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -18,7 +19,7 @@ export function terminalCandidates(platform: NodeJS.Platform, env: NodeJS.Proces
   ];
   if (platform === "darwin") {
     if (env.SSH_CONNECTION || env.SSH_TTY) throw new Error("monitor_desktop_unavailable");
-    return [{ command: "/usr/bin/open", args: ["-a", "Terminal", script] }];
+    return [{ command: "/usr/bin/open", args: ["-a", "/System/Applications/Utilities/Terminal.app", script] }];
   }
   if (platform !== "linux") throw new Error("monitor_platform_unsupported");
   if (!env.DISPLAY && !env.WAYLAND_DISPLAY) throw new Error("monitor_desktop_unavailable");
@@ -46,18 +47,24 @@ async function executable(command: string, env: NodeJS.ProcessEnv): Promise<stri
   }
 }
 
+const terminalDiagnostics = new WeakMap<ChildProcess, string>();
+
 export async function launchTerminal(candidates: TerminalCommand[], env = process.env): Promise<ChildProcess> {
+  let lastError: unknown;
   for (const candidate of candidates) {
     const command = await executable(candidate.command, env);
     if (!command) continue;
     try {
-      const child = spawn(command, candidate.args, { env, detached: true, stdio: "ignore", windowsHide: false });
+      const child = spawn(command, candidate.args, { env, detached: true, stdio: ["ignore", "ignore", "pipe"], windowsHide: false });
+      child.stderr?.on("data", chunk => {
+        terminalDiagnostics.set(child, safeText((terminalDiagnostics.get(child) ?? "") + chunk.toString(), 2_000));
+      });
       await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
       child.unref();
       return child;
-    } catch { /* 尚未成功启动终端进程时，可尝试下一种已安装终端。 */ }
+    } catch (error) { lastError = error; }
   }
-  throw new Error("monitor_terminal_unavailable");
+  throw new Error("monitor_terminal_unavailable", { cause: lastError });
 }
 
 export type OpenMonitorOptions = {
@@ -67,34 +74,46 @@ export type OpenMonitorOptions = {
 };
 
 export async function openMonitor(options: OpenMonitorOptions): Promise<"opened" | "already-open"> {
-  const root = await canonicalStateDirectory(options.stateDir);
-  if ((await findMonitorInstance(root))?.ready) return "already-open";
-  const token = randomUUID();
-  const lease = await acquireMonitorInstance(root, "launcher", token);
-  const until = Date.now() + (options.timeoutMs ?? 15_000);
+  let stage = "状态目录检查";
+  let lease: InstanceLease | undefined;
   let directory: string | undefined;
   let child: ChildProcess | undefined;
-  let failed = false;
+  let failed: number | string | undefined;
   try {
+    const root = await canonicalStateDirectory(options.stateDir);
+    stage = "实例文件锁";
+    if ((await findMonitorInstance(root))?.ready) return "already-open";
+    const token = randomUUID();
+    lease = await acquireMonitorInstance(root, "launcher", token);
+    const until = Date.now() + (options.timeoutMs ?? 15_000);
     if (lease) {
       if ((await findMonitorInstance(root))?.ready) return "already-open";
       const platform = options.platform ?? process.platform;
       const env = options.env ?? process.env;
       // 先检查桌面环境，避免在无桌面的 SSH/CI 中创建启动脚本。
+      stage = "桌面环境检查";
       terminalCandidates(platform, env, "");
+      stage = "启动脚本写入";
       directory = await mkdtemp(join(options.tempRoot ?? tmpdir(), "cpi-monitor-"));
       const script = join(directory, "monitor.command");
       await writeFile(script, monitorScript(options.node ?? process.execPath, options.entry,
         ["--state-dir", root, ...options.args ?? [], "--open-token", token], platform), { mode: 0o700 });
       await chmod(script, 0o700);
       const candidates = terminalCandidates(platform, env, script);
+      stage = "终端启动";
       child = await (options.launch ? options.launch(candidates) : launchTerminal(candidates, env));
-      child?.on("error", () => { failed = true; });
-      child?.on("exit", code => { if (code !== 0) failed = true; });
+      child?.on("error", () => { failed = "spawn_error"; });
+      child?.on("exit", (code, signal) => { if (code !== 0) failed = code ?? signal ?? "unknown"; });
+      if (child?.exitCode !== undefined && child.exitCode !== null && child.exitCode !== 0) failed = child.exitCode;
+      if (child?.signalCode) failed = child.signalCode;
     }
+    stage = "等待监控就绪";
     while (Date.now() < until) {
       if ((await findMonitorInstance(root))?.ready) return lease ? "opened" : "already-open";
-      if (failed) throw new Error("monitor_terminal_failed");
+      if (failed !== undefined) {
+        stage = "终端启动";
+        throw Object.assign(new Error("monitor_terminal_failed"), { exitCode: failed, terminalDiagnostic: child && terminalDiagnostics.get(child) });
+      }
       if (!lease && !await findMonitorInstance(root, "launcher")) {
         if ((await findMonitorInstance(root))?.ready) return "already-open";
         throw new Error("monitor_open_failed");
@@ -102,9 +121,36 @@ export async function openMonitor(options: OpenMonitorOptions): Promise<"opened"
       await delay(100);
     }
     throw new Error("monitor_open_timeout");
+  } catch (error) {
+    throw Object.assign(new Error(error instanceof Error ? error.message : "monitor_open_failed", { cause: error }), { stage });
   } finally {
+    child?.stderr?.destroy();
     await lease?.close();
     // 仅清理本次创建的随机临时目录；已运行的 monitor 不依赖脚本文件。
     if (directory) await rm(directory, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+export function describeMonitorError(error: unknown): string {
+  const reasons: Record<string, string> = {
+    monitor_desktop_unavailable: "当前环境没有可用桌面会话。",
+    monitor_platform_unsupported: "当前平台不支持自动打开终端。",
+    monitor_terminal_unavailable: "未找到可启动的终端。",
+    monitor_terminal_failed: "终端启动失败。",
+    monitor_open_timeout: "等待监控就绪超时，未确认启动成功。",
+    monitor_open_failed: "另一个监控启动请求未成功。",
+  };
+  const current = error as Error & { stage?: string };
+  const details: string[] = [];
+  if (current?.stage) details.push(`阶段：${current.stage}`);
+  if (current?.message in reasons) details.push(current.message);
+  for (let cause: any = error, depth = 0; cause && depth < 4; cause = cause.cause, depth++) {
+    if (typeof cause.code === "string" && /^[A-Z0-9_]{1,40}$/.test(cause.code)) details.push(cause.code);
+    if (["open", "mkdir", "stat", "rename", "unlink", "spawn", "listen"].includes(cause.syscall)) details.push(cause.syscall);
+    if (typeof cause.terminalDiagnostic === "string" && cause.terminalDiagnostic.trim()) details.push(safeText(cause.terminalDiagnostic, 800).replace(/\s+/g, " ").trim());
+    if (typeof cause.exitCode === "number" || typeof cause.exitCode === "string" && /^[A-Za-z_]+$/.test(cause.exitCode)) details.push(`终端退出：${cause.exitCode}`);
+  }
+  const permission = details.some(value => ["EPERM", "EACCES", "EROFS"].includes(value))
+    ? "请确认状态目录可写且允许启动桌面应用；沙盒中可在已有 TTY 运行，或用 --once 读取状态。" : "";
+  return `${reasons[current?.message] ?? "无法启动监控。"}${details.length ? `（${[...new Set(details)].join("；")}）` : ""}${permission}`;
 }

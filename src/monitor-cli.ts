@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createMonitorTui } from "./monitor-tui.js";
 import { DETAIL_SHORTCUTS, MonitorRouter } from "./monitor.js";
-import { defaultStateDir, readSnapshots, SnapshotReader } from "./store.js";
+import { readSnapshots, SnapshotReader } from "./store.js";
+import { resolveStateDirectory } from "./state-directory.js";
 import { MonitorUsageReader } from "./codex-usage.js";
 import { normalizeThreadId, resolveStateThread } from "./state-thread.js";
 import { fileURLToPath } from "node:url";
-import { openMonitor, quoteShell } from "./monitor-open.js";
+import { openMonitor, quoteShell, describeMonitorError } from "./monitor-open.js";
 import { acquireMonitorInstance, canonicalStateDirectory, findMonitorInstance } from "./monitor-instance.js";
 
 const { values } = parseArgs({ options: {
@@ -31,8 +32,8 @@ async function main() {
   if (values["open-token"] && (values.open || values.once)) throw new Error("monitor_open_arguments_invalid");
   const threadId = normalizeThreadId(values["thread-id"] ?? values["codex-thread"]);
   if (values["thread-id"] && values["codex-thread"] && threadId !== normalizeThreadId(values["codex-thread"])) throw new Error("state_thread_conflict");
-  const defaultThread = values["state-dir"] ? undefined : threadId ?? normalizeThreadId(process.env.CODEX_THREAD_ID);
-  const root = await canonicalStateDirectory(values["state-dir"] ?? (defaultThread ? join(defaultStateDir(), defaultThread) : defaultStateDir()));
+  const defaultThread = values["state-dir"] || process.env.CPI_STATE_DIR !== undefined ? undefined : threadId ?? normalizeThreadId(process.env.CODEX_THREAD_ID);
+  const root = await canonicalStateDirectory(resolveStateDirectory(values["state-dir"], defaultThread));
   if (values.open) {
     const entry = fileURLToPath(import.meta.url);
     const args: string[] = [];
@@ -45,21 +46,14 @@ async function main() {
     try {
       const status = await openMonitor({ stateDir: root, entry, args });
       console.log(status === "opened" ? "监控已在终端中就绪。" : "该状态目录已有监控运行，未重复开窗；沿用已有监控的筛选条件。");
+      return;
     } catch (error) {
-      const reasons: Record<string, string> = {
-        monitor_desktop_unavailable: "当前环境没有可用桌面会话。",
-        monitor_platform_unsupported: "当前平台不支持自动打开终端。",
-        monitor_terminal_unavailable: "未找到可启动的终端。",
-        monitor_terminal_failed: "终端启动失败。",
-        monitor_open_timeout: "等待监控就绪超时，未确认启动成功。",
-        monitor_open_failed: "另一个监控启动请求未成功。",
-      };
-      const code = error instanceof Error ? error.message : "monitor_open_failed";
-      console.error(reasons[code] ?? "无法打开监控终端。");
+      console.error(describeMonitorError(error));
       console.error(`请在本机终端手动运行：\n${[process.execPath.replaceAll("\\", "/"), entry.replaceAll("\\", "/"), "--state-dir", root, ...args].map(quoteShell).join(" ")}`);
-      process.exitCode = 1;
+      console.error("无桌面或无法交互时，在上述命令末尾追加 --once 读取一次状态。");
+      if (!process.stdin.isTTY || !process.stdout.isTTY) { process.exitCode = 1; return; }
+      console.error("自动开窗不可用，改在当前 TTY 中显示监控；按 q 退出。");
     }
-    return;
   }
   const usageReader = new MonitorUsageReader({ home: values["codex-home"], stateDir: root, threadId });
   if (values.once) {
@@ -101,11 +95,12 @@ async function main() {
       router.update(reader.read());
       tui.start();
       refresh();
-      instance.status.ready = true;
+      await instance.markReady();
     } catch (error) {
       quit();
       throw error;
     }
+    if (stopped) return;
     timer = setInterval(refresh, 500);
     process.once("SIGINT", quit);
     process.once("SIGTERM", quit);

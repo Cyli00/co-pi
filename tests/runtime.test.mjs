@@ -58,6 +58,20 @@ async function setup(t, handler, { extension = '', settings: overrides = {} } = 
 }
 const finalCalls = (summary = '已完成') => [{ id: `handoff-${summary}`, name: 'submit_handoff', args: handoff(summary) }];
 
+test('真实 SDK 认证失败保留固定分类和指引，不泄露供应商响应正文', { timeout: 45000 }, async t => {
+  const sentinel = 'PRIVATE_PROVIDER_BODY_MUST_NOT_ESCAPE';
+  const env = await setup(t, (_req, res) => {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: sentinel } }));
+  });
+  const result = await env.run('read-only');
+  assert.equal(result.tasks[0].status, 'failed');
+  assert.equal(result.tasks[0].error, 'model_auth_rejected');
+  assert.match(result.tasks[0].guidance, /认证/);
+  assert.ok(!JSON.stringify(result).includes(sentinel));
+  assert.ok(!JSON.stringify(env.snapshots).includes(sentinel));
+});
+
 test('交接缺少必填字段时退回具体错误，worker 补齐后重新提交', { timeout: 45_000 }, async t => {
   const invalid = handoff();
   delete invalid.verification;
@@ -194,7 +208,7 @@ test('真实 SDK 自动重试与压缩可观察，agent_end 不会提前交付',
   assert.ok(summaries > 0);
   const final = env.snapshots.at(-1).tasks[0];
   assert.equal(final.runtime.settled, true); assert.equal(final.runtime.compacting, false);
-  assert.equal(final.metrics.contextTokens, null);
+  assert.equal(final.metrics.contextTokens, null, JSON.stringify({ compaction: final.events.filter(e => e.kind === "compaction"), requests: env.requests.map(r => ({ tools: r.tools?.length ?? 0, lastRoles: r.messages.slice(-3).map(m => m.role) })) }));
 });
 
 test('配置接受 max，同时拒绝非法模型专属强度', async t => {

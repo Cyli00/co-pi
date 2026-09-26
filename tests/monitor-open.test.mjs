@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
-import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
+import { spawnSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { temporary } from './helpers.mjs';
 import { WINDOWS_SHELL } from '../dist/platform.js';
 import { canonicalStateDirectory, acquireMonitorInstance, findMonitorInstance } from '../dist/monitor-instance.js';
-import { monitorScript, terminalCandidates, openMonitor, launchTerminal } from '../dist/monitor-open.js';
+import { monitorScript, terminalCandidates, openMonitor, launchTerminal, describeMonitorError } from '../dist/monitor-open.js';
 
 test('平台分支选用独立终端，并保留带空格的脚本路径', () => {
   const script = '/tmp/space dir/monitor.command';
@@ -17,7 +17,7 @@ test('平台分支选用独立终端，并保留带空格的脚本路径', () =>
   assert.ok(windows[0].args.includes('new'));
   assert.ok(windows[0].args.includes(WINDOWS_SHELL));
   assert.match(windows[1].command, /mintty\.exe$/);
-  assert.deepEqual(terminalCandidates('darwin', {}, script), [{ command: '/usr/bin/open', args: ['-a', 'Terminal', script] }]);
+  assert.deepEqual(terminalCandidates('darwin', {}, script), [{ command: '/usr/bin/open', args: ['-a', '/System/Applications/Utilities/Terminal.app', script] }]);
   const linux = terminalCandidates('linux', { DISPLAY: ':0' }, script);
   assert.deepEqual(linux.map(x => x.command), ['gnome-terminal', 'konsole', 'xfce4-terminal', 'x-terminal-emulator', 'xterm']);
   assert.equal(terminalCandidates('linux', { WAYLAND_DISPLAY: 'wayland-0', XDG_CURRENT_DESKTOP: 'KDE' }, script)[0].command, 'konsole');
@@ -42,14 +42,14 @@ test('启动脚本将引号、换行和 shell 元字符原样传递，不执行�
   }
 });
 
-test('实例互斥、就绪状态和退出后释放使用真实本机连接', async t => {
+test('文件锁跨调用互斥、发布就绪状态，退出后释放', async t => {
   const root = await canonicalStateDirectory(join(temporary(t), 'not-created', 'state'));
   const first = await acquireMonitorInstance(root, 'monitor');
   t.after(() => first.close());
   assert.ok(first);
   assert.equal((await findMonitorInstance(root)).ready, false);
   assert.equal(await acquireMonitorInstance(root, 'monitor'), undefined);
-  first.status.ready = true;
+  await first.markReady();
   assert.equal((await findMonitorInstance(root)).ready, true);
   await first.close();
   assert.equal(await findMonitorInstance(root), undefined);
@@ -59,10 +59,9 @@ test('实例互斥、就绪状态和退出后释放使用真实本机连接', as
 });
 
 test('同时打开同一状态目录只启动一次，等 monitor 就绪后返回', async t => {
-  const root = temporary(t);
-  const stateDir = join(root, 'state');
   let launches = 0, monitor;
-  t.after(() => monitor?.close());
+  const root = temporary(t, () => monitor?.close());
+  const stateDir = join(root, 'state');
   const launch = async commands => {
     launches++;
     const script = commands[0].args.at(-1);
@@ -72,7 +71,7 @@ test('同时打开同一状态目录只启动一次，等 monitor 就绪后返�
     await delay(100);
     monitor = await acquireMonitorInstance(stateDir, 'monitor');
     assert.ok(monitor);
-    monitor.status.ready = true;
+    await monitor.markReady();
   };
   const options = { stateDir, entry: join(root, 'monitor.js'), platform: 'linux', env: { DISPLAY: ':0' }, tempRoot: root, launch, timeoutMs: 5000 };
   const results = await Promise.all([openMonitor(options), openMonitor(options)]);
@@ -80,14 +79,15 @@ test('同时打开同一状态目录只启动一次，等 monitor 就绪后返�
   assert.deepEqual(results.sort(), ['already-open', 'opened']);
   assert.equal(await openMonitor(options), 'already-open');
   assert.equal(launches, 1);
-  assert.deepEqual(await readdir(root), []);
+  assert.deepEqual(await readdir(root), ['state']);
+  assert.deepEqual((await readdir(stateDir)).sort(), ['.cpi-monitor.json', '.cpi-monitor.json.lock']);
 });
 
 test('已有手动 monitor 时复用实例，无桌面不创建脚本', async t => {
   const root = temporary(t);
   const monitor = await acquireMonitorInstance(root, 'monitor');
   t.after(() => monitor.close());
-  monitor.status.ready = true;
+  await monitor.markReady();
   const options = { stateDir: root, entry: 'unused', platform: 'linux', env: {}, tempRoot: root,
     launch: async () => assert.fail('不应打开终端') };
   assert.equal(await openMonitor(options), 'already-open');
@@ -139,4 +139,68 @@ test('CLI 拒绝冲突参数，非 TTY 的子启动不误报就绪', t => {
   const nonTty = run(['--open-token', 'expired']);
   assert.equal(nonTty.status, 1);
   assert.match(nonTty.stderr, /TTY/);
+});
+
+
+test('真实子进程持锁互斥，异常退出的过期锁可恢复且不会继承旧 ready', async t => {
+  let child;
+  const root = temporary(t, async () => {
+    if (child?.exitCode === null && child?.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; }
+  });
+  const entry = new URL('../dist/monitor-instance.js', import.meta.url).href;
+  child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { acquireMonitorInstance } from ${JSON.stringify(entry)};
+    const lease = await acquireMonitorInstance(${JSON.stringify(root)}, 'monitor');
+    await lease.markReady();
+    process.send('ready');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  child.stderr.resume();
+  await once(child, 'message');
+  assert.equal((await findMonitorInstance(root)).ready, true);
+  assert.equal(await acquireMonitorInstance(root, 'monitor'), undefined);
+  const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
+  const old = new Date(Date.now() - 60_000);
+  await utimes(join(root, '.cpi-monitor.json.lock'), old, old);
+  assert.equal(await findMonitorInstance(root), undefined);
+  const next = await acquireMonitorInstance(root, 'monitor');
+  try {
+    assert.equal((await findMonitorInstance(root)).ready, false);
+    await next.markReady();
+    assert.equal((await findMonitorInstance(root)).ready, true);
+  } finally { await next.close(); }
+});
+
+test('启动错误显示失败阶段和系统错误码，不回显底层任意正文', async t => {
+  const root = temporary(t);
+  await assert.rejects(openMonitor({ stateDir: root, entry: 'unused', platform: 'linux', env: { DISPLAY: ':0' }, tempRoot: root,
+    launch: async () => { throw Object.assign(new Error('private diagnostic body'), { code: 'EPERM', syscall: 'spawn' }); },
+  }), error => {
+    const text = describeMonitorError(error);
+    assert.match(text, /阶段：终端启动/);
+    assert.match(text, /EPERM/);
+    assert.match(text, /--once/);
+    assert.ok(!text.includes('private diagnostic body'));
+    return true;
+  });
+  await assert.rejects(openMonitor({ stateDir: root, entry: 'unused', platform: 'linux', env: { DISPLAY: ':0' }, tempRoot: root,
+    launch: async () => Object.assign(new EventEmitter(), { exitCode: 7 }),
+  }), error => {
+    assert.match(describeMonitorError(error), /终端退出：7/);
+    return true;
+  });
+});
+
+
+test('终端真实子进程失败保留简短 stderr 并脱敏', async t => {
+  const root = temporary(t);
+  await assert.rejects(openMonitor({ stateDir: root, entry: 'unused', platform: 'linux', env: { DISPLAY: ':0' }, tempRoot: root,
+    launch: () => launchTerminal([{ command: process.execPath, args: ['-e', 'console.error("terminal diagnostic api_key=sk-test1234567890123456789"); process.exit(7)'] }]),
+  }), error => {
+    const text = describeMonitorError(error);
+    assert.match(text, /terminal diagnostic/);
+    assert.match(text, /终端退出：7/);
+    assert.ok(!text.includes('sk-test1234567890123456789'));
+    return true;
+  });
 });

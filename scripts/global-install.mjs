@@ -78,7 +78,7 @@ async function activate(path, staging, kind, backupRoot) {
   return backup;
 }
 
-export async function installGlobal(plan, { agentDir, node = process.execPath } = {}) {
+export async function installGlobal(plan, { agentDir, node = process.execPath, stateDir } = {}) {
   await checkGlobalInstall(plan);
   const { source, pluginDir, skillDir } = plan;
   // 先准备完整副本，再切换目录；旧版本移至技能发现目录之外，避免重复加载。
@@ -96,7 +96,7 @@ export async function installGlobal(plan, { agentDir, node = process.execPath } 
         developerName: 'co-pi contributors', category: 'Productivity', capabilities: ['Write'],
         defaultPrompt: ['使用 co-pi 委派一个边界明确的任务。'] } }, null, 2) + '\n');
     await writeFile(join(target, '.mcp.json'), JSON.stringify({ mcpServers: { 'co-pi': {
-      command: node, args: [join(pluginDir, 'dist/cli.js'), '--agent-dir', agentDir],
+      command: node, args: [join(pluginDir, 'dist/cli.js'), '--agent-dir', agentDir, ...stateDir ? ['--state-dir', stateDir] : []],
       startup_timeout_sec: 20, tool_timeout_sec: 3900 } } }, null, 2) + '\n');
   });
   const skillStage = await stage(skillDir, 'skill', target =>

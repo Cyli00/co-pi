@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createMcpServer } from "./mcp.js";
 import { Supervisor } from "./supervisor.js";
-import { defaultStateDir } from "./store.js";
+import { resolveStateDirectory } from "./state-directory.js";
 import { normalizeThreadId } from "./state-thread.js";
 
 const { values } = parseArgs({ options: {
@@ -16,13 +17,25 @@ const { values } = parseArgs({ options: {
   help: { type: "boolean" },
 } });
 if (values.help) {
-  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（有线程 ID 时默认 ~/.cpi/state/<线程ID>）\n--thread-id <ID>  绑定的主 agent 线程（默认 CODEX_THREAD_ID）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--parallelism <1–4>  并发 worker 数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
+  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（未传参数时先读取 CPI_STATE_DIR；macOS 默认使用用户临时目录）\n--thread-id <ID>  绑定的主 agent 线程（默认 CODEX_THREAD_ID）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--parallelism <1–4>  并发 worker 数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
 } else {
+  await main().catch(error => {
+    const code = error?.code;
+    console.error(["EPERM", "EACCES", "EROFS"].includes(code)
+      ? `state_directory_unwritable (${code})：请用 --state-dir 或 CPI_STATE_DIR 指定允许写入的状态目录，monitor 必须使用同一路径。`
+      : error instanceof Error ? error.message : "mcp_start_failed");
+    process.exitCode = 1;
+  });
+}
+
+async function main() {
   const timeout = Number(values["task-timeout-ms"]);
   if (!Number.isSafeInteger(timeout) || timeout < 100 || timeout > 86_400_000) throw new Error("task_timeout_invalid");
   const threadId = normalizeThreadId(values["thread-id"] ?? process.env.CODEX_THREAD_ID);
+  const stateDir = resolveStateDirectory(values["state-dir"], threadId);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const supervisor = new Supervisor({
-    stateDir: resolve(values["state-dir"] ?? (threadId ? join(defaultStateDir(), threadId) : defaultStateDir())),
+    stateDir,
     threadId,
     agentDir: resolve(values["agent-dir"] ?? join(homedir(), ".pi", "agent")),
     parallelism: Number(values.parallelism), taskTimeoutMs: timeout,

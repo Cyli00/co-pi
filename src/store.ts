@@ -2,11 +2,10 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { CpiError, safeText, snapshotSchema, type Snapshot } from "./protocol.js";
 
-export const defaultStateDir = () => join(homedir(), ".cpi", "state");
+export { defaultStateDir } from "./state-directory.js";
 
 // 合法快照的字节上限：snapshotSchema 里每个字符串 .max() 以 UTF-16 码元计，
 // 而 JSON 文本最坏会把一个码元转义成 \uXXXX（6 字节），据此推导读取端接受的最大文件。

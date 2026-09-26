@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
-import { createConnection, createServer, type Server } from "node:net";
-import { realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { check, lock } from "proper-lockfile";
 
 export type InstanceStatus = { key: string; ready: boolean; token?: string };
+const STALE_MS = 10_000;
 
 export async function canonicalStateDirectory(path: string): Promise<string> {
   const absolute = resolve(path);
@@ -17,65 +18,79 @@ export async function canonicalStateDirectory(path: string): Promise<string> {
   }
 }
 
-function address(root: string, kind: "monitor" | "launcher") {
+async function address(root: string, kind: "monitor" | "launcher") {
+  root = await canonicalStateDirectory(root);
   const identity = `${homedir()}\0${root}\0${kind}`;
   const key = createHash("sha256").update(process.platform === "win32" ? identity.toLowerCase() : identity).digest("hex");
-  const first = 20_000 + Number.parseInt(key.slice(0, 8), 16) % 40_000;
-  return { key, ports: Array.from({ length: 16 }, (_, i) => 20_000 + (first - 20_000 + i) % 40_000) };
+  const file = join(root, `.cpi-${kind}.json`);
+  return { root, key, file, options: { realpath: false, stale: STALE_MS, lockfilePath: `${file}.lock` } };
 }
 
-async function probe(port: number, key: string): Promise<InstanceStatus | undefined> {
-  return new Promise(resolve => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    let text = "";
-    const finish = (status?: InstanceStatus) => { socket.destroy(); resolve(status); };
-    socket.setTimeout(200, () => finish());
-    socket.on("error", () => finish());
-    socket.on("data", chunk => {
-      text += chunk.toString();
-      if (text.length > 1024) return finish();
-      if (!text.includes("\n")) return;
-      try {
-        const value = JSON.parse(text.split("\n")[0]!);
-        finish(value.key === key && typeof value.ready === "boolean" ? value : undefined);
-      } catch { finish(); }
-    });
-    socket.on("end", () => finish());
-  });
+async function lockIdentity(path: string): Promise<string> {
+  const info = await stat(path, { bigint: true });
+  return `${info.dev}/${info.ino}/${info.birthtimeNs}`;
 }
 
 export async function findMonitorInstance(root: string, kind: "monitor" | "launcher" = "monitor"): Promise<InstanceStatus | undefined> {
-  const { key, ports } = address(root, kind);
-  const statuses = await Promise.all(ports.map(port => probe(port, key)));
-  return statuses.find(Boolean);
+  const { key, file, options } = await address(root, kind);
+  try {
+    if (!await check(file, options)) return;
+    const identity = await lockIdentity(options.lockfilePath);
+    const value = JSON.parse(await readFile(file, "utf8"));
+    // 状态必须属于这一次加锁，不能把崩溃进程遗留的 ready 当作新实例。
+    if (!value || value.key !== key || typeof value.ready !== "boolean" || value.lockIdentity !== identity
+      || (value.token !== undefined && typeof value.token !== "string")) return { key, ready: false };
+    if (await lockIdentity(options.lockfilePath) !== identity || !await check(file, options)) return;
+    return { key, ready: value.ready, token: value.token };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) {
+      return await check(file, options) ? { key, ready: false } : undefined;
+    }
+    throw error;
+  }
 }
 
-export type InstanceLease = { status: InstanceStatus; close(): Promise<void> };
+export type InstanceLease = { readonly status: Readonly<InstanceStatus>; markReady(): Promise<void>; close(): Promise<void> };
 
 export async function acquireMonitorInstance(root: string, kind: "monitor" | "launcher", token?: string): Promise<InstanceLease | undefined> {
-  const { key, ports } = address(root, kind);
-  const status: InstanceStatus = { key, ready: false, token };
-  for (const port of ports) {
-    const server: Server = createServer(socket => {
-      socket.on("error", () => socket.destroy());
-      socket.setTimeout(1000, () => socket.destroy());
-      socket.end(JSON.stringify(status) + "\n");
-    });
-    try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
-          server.removeListener("error", reject);
-          resolve();
-        });
-      });
-      server.on("error", () => {});
-      return { status, close: () => new Promise(resolve => server.close(() => resolve())) };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
-      if (await probe(port, key)) return undefined;
-      // 端口散列碰撞时避开其他服务；连接只返回实例身份和就绪状态，不传任务数据。
-    }
+  const { key, file, options, root: canonicalRoot } = await address(root, kind);
+  await mkdir(canonicalRoot, { recursive: true, mode: 0o700 });
+  let release: () => Promise<void>;
+  try { release = await lock(file, { ...options, update: 2_000 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOCKED") return;
+    throw error;
   }
-  throw new Error("monitor_instance_ports_unavailable");
+  const status: InstanceStatus = { key, ready: false, token };
+  let closing: Promise<void> | undefined;
+  let pending = Promise.resolve();
+  try {
+    const identity = await lockIdentity(options.lockfilePath);
+    const publish = async () => {
+      const staging = `${file}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(staging, JSON.stringify({ ...status, lockIdentity: identity }), { flag: "wx", mode: 0o600 });
+        await rename(staging, file);
+      } finally { await unlink(staging).catch(() => {}); }
+    };
+    await publish();
+    return {
+      status,
+      markReady() {
+        if (closing) return Promise.reject(new Error("monitor_instance_closed"));
+        status.ready = true;
+        return pending = pending.then(publish);
+      },
+      close() {
+        return closing ??= (async () => {
+          try {
+            await pending;
+            if (await lockIdentity(options.lockfilePath) === identity) await unlink(file).catch(error => {
+              if (error.code !== "ENOENT") throw error;
+            });
+          } finally { await release(); }
+        })();
+      },
+    };
+  } catch (error) { await release(); throw error; }
 }

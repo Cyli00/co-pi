@@ -1,6 +1,8 @@
 import { Markdown, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { isTerminal, safeText, type Activity, type TaskState } from "./protocol.js";
 
+import { runtimeErrorSummary } from "./runtime-errors.js";
+
 export type FeedFilter = "all" | "stages" | "tools" | "text" | "handoff";
 export const filters: { id: FeedFilter; label: string }[] = [
   { id: "all", label: "全部" }, { id: "stages", label: "阶段" }, { id: "tools", label: "工具" },
@@ -119,7 +121,7 @@ export function renderFeedLayout(state: TaskState, width: number, filter: FeedFi
     } else {
       const tone = event.kind === "runtime" && state.error ? "error" : kind === "tools" ? "tools" : "stages";
       const label = stageLabels[event.kind] ?? (kind === "tools" ? "工具" : "阶段");
-      for (const line of wrap(`${label} · ${time}  ${event.text}`)) lines.push(style.paint(tone, `◆ ${line}`));
+      for (const line of wrap(`${label} · ${time}  ${event.kind === "runtime" ? runtimeErrorSummary(event.text) : event.text}`)) lines.push(style.paint(tone, `◆ ${line}`));
     }
     mark(`event:${event.id ?? `${event.at}/${event.kind}/${event.text}`}`, start);
   }

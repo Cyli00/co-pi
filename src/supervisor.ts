@@ -9,6 +9,8 @@ import {
   type MessageMode, type MessageReceipt,
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
+import { readPiSettings } from "./pi-settings.js";
+import { runtimeErrorGuidance, runtimeErrorSummary } from "./runtime-errors.js";
 import { StateStore } from "./store.js";
 import { bindStateThread } from "./state-thread.js";
 import { isSettled } from "./handoff-contract.js";
@@ -35,6 +37,7 @@ export interface BatchResult {
     origin: "worker" | "runtime";
     handoff?: Handoff;
     error?: string;
+    guidance?: string;
   }[];
 }
 interface BatchRun {
@@ -130,6 +133,14 @@ export class Supervisor extends EventEmitter {
 
   private async execute(batch: Batch, run: BatchRun): Promise<BatchResult> {
     this.changed(run.snapshot);
+    // 自定义 worker 不依赖 pi；默认 worker 在派生进程前检查共享配置。
+    if (!this.options.workerPath) {
+      try { await readPiSettings(this.options.agentDir); }
+      catch (error) {
+        for (const state of run.snapshot.tasks) this.finish(state, run.snapshot, errorCode(error));
+        return this.result(run.snapshot);
+      }
+    }
     let cursor = 0;
     const consume = async () => {
       for (;;) {
@@ -153,6 +164,7 @@ export class Supervisor extends EventEmitter {
       tasks: snapshot.tasks.map(state => ({
         id: state.task.id, title: safeText(state.task.title, 160), status: state.phase,
         origin: state.handoff ? "worker" : "runtime", handoff: state.handoff, error: state.error,
+        ...(state.error && runtimeErrorGuidance(state.error) ? { guidance: runtimeErrorGuidance(state.error) } : {}),
       })),
     };
   }
@@ -371,8 +383,8 @@ export class Supervisor extends EventEmitter {
     if (isTerminal(state.phase)) return;
     state.phase = code === "cancelled" ? "cancelled" : "failed";
     state.error = code;
-    state.summary = code;
-    this.activity(state, "runtime", code);
+    state.summary = runtimeErrorSummary(code);
+    this.activity(state, "runtime", state.summary);
     this.changed(snapshot);
   }
 

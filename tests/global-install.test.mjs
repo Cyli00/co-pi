@@ -40,13 +40,14 @@ test('安装完整技能和独立运行文件，重复安装将原版本移出�
   assert.deepEqual(result.backups, []);
   assert.equal(await readFile(join(plan.skillDir, 'references/recovery.md'), 'utf8'), '恢复流程');
   await writeFile(join(plan.skillDir, 'SKILL.md'), '用户修改');
-  const again = await installGlobal(plan, { agentDir: join(root, 'pi') });
+  const again = await installGlobal(plan, { agentDir: join(root, 'pi'), stateDir: join(root, 'custom state') });
   assert.equal(again.backups.length, 2);
   assert.equal(await readFile(join(again.backups[1], 'SKILL.md'), 'utf8'), '用户修改');
   assert.equal(await readFile(join(plan.skillDir, 'SKILL.md'), 'utf8'), '技能');
   await rename(source, join(root, 'moved-source'));
   const mcp = JSON.parse(await readFile(join(plan.pluginDir, '.mcp.json'), 'utf8')).mcpServers['co-pi'];
   assert.equal(mcp.args[0], join(plan.pluginDir, 'dist/cli.js'));
+  assert.deepEqual(mcp.args.slice(-2), ['--state-dir', join(root, 'custom state')]);
   const run = spawnSync(mcp.command, mcp.args, { encoding: 'utf8', windowsHide: true });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /global-runtime-ok/);

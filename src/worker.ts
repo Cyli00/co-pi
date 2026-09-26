@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { inheritedSettings } from "./settings.js";
+import { classifyModelError } from "./runtime-errors.js";
 import { workerInstructions } from "./instructions.js";
 import { hasUv } from "./platform.js";
 import { Mailbox } from "./mailbox.js";
@@ -122,7 +123,7 @@ export async function runWorker(start: WorkerStart): Promise<void> {
     ],
   });
   session = result.session;
-  let modelFailed = false;
+  let modelFailure: string | undefined;
   let extensionFailed = false;
   let attached = false;
   const telemetry = new Telemetry(session, event => send(event));
@@ -136,7 +137,10 @@ export async function runWorker(start: WorkerStart): Promise<void> {
     if (event.type === "message_start" && event.message.role === "user") candidate = undefined;
     // 新交接即使未通过参数校验，也不能回退交付先前的候选结果。
     if (event.type === "tool_execution_start" && event.toolName !== "report_progress") candidate = undefined;
-    if (event.type === "message_end" && event.message.role === "assistant") modelFailed = ["error", "aborted"].includes(event.message.stopReason);
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      modelFailure = ["error", "aborted"].includes(event.message.stopReason)
+        ? classifyModelError(event.message.errorMessage) : undefined;
+    }
   });
   try {
     await session.bindExtensions({
@@ -171,7 +175,7 @@ ${start.context || "No additional authorization."}`;
       if (!session.isIdle || mailbox.busy) continue;
       if (cancelled) throw new CpiError("cancelled");
       if (extensionFailed) throw new CpiError("pi_extension_runtime_failed");
-      if (modelFailed) throw new CpiError("model_request_failed");
+      if (modelFailure) throw new CpiError(modelFailure);
       if (candidate) break;
       if (summarizedRevision === mailbox.revision) throw new CpiError("handoff_missing");
       summarizedRevision = mailbox.revision;

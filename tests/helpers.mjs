@@ -8,7 +8,8 @@ export const platformSettings = process.platform === 'win32' ? { shellPath: WIND
 export function temporary(t, dispose = async () => {}) {
   const base = process.platform === 'win32' ? join(homedir(), 'AppData', 'Local', 'Temp', 'co-pi-tests') : join(tmpdir(), 'co-pi-tests');
   mkdirSync(base, { recursive: true });
-  const directory = mkdtempSync(join(base, 'run-'));
+  // macOS 的临时目录可经 /var 链接访问；与运行时 canonical path 保持一致。
+  const directory = realpathSync(mkdtempSync(join(base, 'run-')));
   t.after(async () => {
     await dispose();
     const target = realpathSync(directory);

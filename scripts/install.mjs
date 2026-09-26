@@ -38,7 +38,7 @@ export async function readSettings(agentDir, name = 'settings.json') {
   return { path, raw, settings, mode: info.mode & 0o777 };
 }
 
-export async function preflight({ platform = process.platform, agentDir, binDir, global, runProbe = probe, nodeVersion = process.versions.node }) {
+export async function preflight({ platform = process.platform, agentDir, binDir, stateDir, global, runProbe = probe, nodeVersion = process.versions.node }) {
   if (!['win32', 'darwin', 'linux'].includes(platform)) throw failure('platform_unsupported');
   if (!supportedNode(nodeVersion)) throw failure('node_version_required');
   if (platform === 'win32') {
@@ -57,7 +57,7 @@ export async function preflight({ platform = process.platform, agentDir, binDir,
   const monitor = monitorCommandPlan({ platform, prefix, binDir, root: global?.pluginDir ?? projectDir });
   await checkMonitorCommand(monitor);
   const uv = runProbe('uv', ['--version']);
-  return { platform, agentDir, monitor, global, uvAvailable: /^uv\s+\d+\./.test(uv ?? ''),
+  return { platform, agentDir, monitor, global, stateDir, uvAvailable: /^uv\s+\d+\./.test(uv ?? ''),
     ...await readSettings(agentDir) };
 }
 
@@ -95,13 +95,13 @@ async function saveSettings(agentDir, name, plan, settings) {
   return { changed: true, backup };
 }
 
-export function mcpConfig(agentDir, root = projectDir, node = process.execPath) {
-  return `[mcp_servers.co-pi]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([join(root, 'dist', 'cli.js'), '--agent-dir', agentDir])}\nstartup_timeout_sec = 20\ntool_timeout_sec = 3900`;
+export function mcpConfig(agentDir, root = projectDir, node = process.execPath, stateDir) {
+  return `[mcp_servers.co-pi]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([join(root, 'dist', 'cli.js'), '--agent-dir', agentDir, ...stateDir ? ['--state-dir', stateDir] : []])}\nstartup_timeout_sec = 20\ntool_timeout_sec = 3900`;
 }
 
 export async function install(plan, { build = buildProject, configure = configurePi, register = installMonitorCommand, publish = installGlobal } = {}) {
   await build(plan.platform);
-  const global = plan.global ? await publish(plan.global, { agentDir: plan.agentDir }) : undefined;
+  const global = plan.global ? await publish(plan.global, { agentDir: plan.agentDir, stateDir: plan.stateDir }) : undefined;
   const result = await configure(plan);
   return { ...result, global, monitor: await register(plan.monitor) };
 }
@@ -165,24 +165,32 @@ const errors = {
   global_install_overlap: '插件、技能与源目录不能互相包含；请指定独立的安装目标。',
 };
 
+export function piSetupGuidance(settings) {
+  const configured = typeof settings.defaultProvider === 'string' && settings.defaultProvider.trim()
+    && typeof settings.defaultModel === 'string' && settings.defaultModel.trim();
+  return `${configured ? '已检测到 pi 默认模型。' : '尚未保存 pi 默认模型，worker 暂不可用（pi_default_model_required）。'}
+在 pi 中进入 /model，选择模型后按 Ctrl+S 确认并保存默认模型；进入 /thinking，选择强度后按 Ctrl+S 确认并保存默认思考强度。
+只切换当前会话不等于保存默认值。pi 与 MCP --agent-dir 必须使用同一配置目录；重开 pi 核对后再委派。`;
+}
+
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({ args, options: {
     platform: { type: 'string' }, 'agent-dir': { type: 'string' }, 'bin-dir': { type: 'string' }, check: { type: 'boolean' }, help: { type: 'boolean' },
-    'plugin-dir': { type: 'string' }, 'skills-dir': { type: 'string' },
+    'plugin-dir': { type: 'string' }, 'skills-dir': { type: 'string' }, 'state-dir': { type: 'string' },
   } });
   if (values.help) {
-    console.log('用法：node scripts/install.mjs [--check] [--agent-dir <目录>] [--bin-dir <目录>] [--plugin-dir <目录>] [--skills-dir <目录>]\n--check  仅检查，不安装或修改文件。\n--bin-dir  cpi-monitor 快捷命令目录，默认 npm 全局命令目录。\n--plugin-dir  插件完整目标目录，默认 ~/.codex/plugins/co-pi。\n--skills-dir  技能父目录，默认 ~/.codex/skills；在其下安装 co-pi。\n设置 CODEX_HOME 时，全局默认目录随之改变。');
+    console.log('用法：node scripts/install.mjs [--check] [--agent-dir <目录>] [--bin-dir <目录>] [--plugin-dir <目录>] [--skills-dir <目录>]\n--check  仅检查，不安装或修改文件。\n--bin-dir  cpi-monitor 快捷命令目录，默认 npm 全局命令目录。\n--plugin-dir  插件完整目标目录，默认 ~/.codex/plugins/co-pi。\n--state-dir  显式状态目录，写入 MCP 参数；适用于固定单线程实例。\n--skills-dir  技能父目录，默认 ~/.codex/skills；在其下安装 co-pi。\n设置 CODEX_HOME 时，全局默认目录随之改变。');
     return;
   }
   if (values.platform && values.platform !== process.platform) throw failure('platform_mismatch');
   const global = globalInstallPlan({ source: projectDir, pluginDir: values['plugin-dir'], skillsDir: values['skills-dir'] });
-  const plan = await preflight({ agentDir: resolve(values['agent-dir'] ?? join(homedir(), '.pi', 'agent')), binDir: values['bin-dir'], global });
+  const plan = await preflight({ agentDir: resolve(values['agent-dir'] ?? join(homedir(), '.pi', 'agent')), binDir: values['bin-dir'], stateDir: values['state-dir'] ? resolve(values['state-dir']) : undefined, global });
   const mode = await distributionMode();
   if (mode === 'runtime') await validateRuntimeDistribution();
   console.log(mode === 'runtime' ? '安装类型：预编译运行包（仅安装运行依赖，无需 TypeScript 编译）。' : '安装类型：源码（安装开发依赖并编译）。');
   console.log(`平台：${plan.platform}\npi 设置：${plan.path}\nUV：${plan.uvAvailable ? '可用，将加入 uv run 指令' : '不可用，不加入 Python 执行指令'}`);
   if (plan.platform === 'win32') console.log(`Git Bash：已验证；${plan.settings.shellPath === WINDOWS_SHELL ? 'shellPath 已配置' : '安装时将合并 shellPath 并备份已有设置'}。`);
-  if (!plan.settings.defaultProvider || !plan.settings.defaultModel) console.log('尚未配置 pi 默认模型：安装后请通过 pi /model 保存模型与 /thinking 保存思考强度。');
+  console.log(piSetupGuidance(plan.settings));
   console.log(`快捷命令目录：${plan.monitor.directory}${plan.monitor.inPath ? '（已在 PATH）' : '（当前 PATH 未包含；使用前请将该目录加入终端 PATH）'}`);
   console.log(`全局插件：${global.pluginDir}\n全局技能：${global.skillDir}`);
   if (values.check) { console.log('预检查完成，未修改文件。'); return; }
@@ -191,7 +199,8 @@ export async function main(args = process.argv.slice(2)) {
   for (const backup of result.global.backups) console.log(`全局安装备份：${backup}`);
   console.log('内置权限模块已就绪：工作区内可确认的操作免审，外部路径和未知范围交给 Codex 自动审批；不安装或注册完整 pi-permission-system 扩展。');
   console.log(`已注册 cpi-monitor 快捷命令：${result.monitor.directory}。参数会原样传递，例如 cpi-monitor --state-dir <目录>。`);
-  console.log(`全局安装与平台配置完成。安全指令将在每个 worker 启动时自动注入。\n首次接入时，将以下内容合并到 Codex config.toml；已有同名配置时更新该表：\n\n${mcpConfig(plan.agentDir, global.pluginDir)}\n\n技能已安装：${global.skillDir}\n重新启动 Codex 后可跨项目使用，无需逐项目复制。\n监控命令：cpi-monitor
+  console.log(piSetupGuidance(plan.settings));
+  console.log(`全局安装与平台配置完成。安全指令将在每个 worker 启动时自动注入。\n首次接入时，将以下内容合并到 Codex config.toml；已有同名配置时更新该表：\n\n${mcpConfig(plan.agentDir, global.pluginDir, process.execPath, plan.stateDir)}\n\n技能已安装：${global.skillDir}\n重新启动 Codex 后可跨项目使用，无需逐项目复制。\n监控命令：cpi-monitor
 完整路径备用：node ${JSON.stringify(join(global.pluginDir, 'dist', 'monitor-cli.js'))}\n模型、认证与思考强度的配置步骤见 README.md。`);
 }
 
