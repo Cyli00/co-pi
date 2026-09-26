@@ -206,6 +206,8 @@ terminal = "auto"
 
 `retry` 控制 SDK agent 层重试，`retry.provider` 控制供应商请求层重试；两者独立。可选 `retry.max_agent_delay_ms` 控制 agent 重试等待上限。次数、毫秒和 token 数必须是非负整数。`parallelism` 为 1–4，可用现有 `--parallelism` 参数临时覆盖。任务超时继续使用 `--task-timeout-ms`。
 
+主 agent 在规划每个新批次前调用只读 `get_capabilities`，获取当前有效 `parallelism`、来源 `parallelism_source` 和单批上限 `max_batch_size`。并发数控制同时运行的 worker，单批上限仍为 4，多出的任务排队。例如并发为 2 时可以提交 4 项独立任务，最多同时执行 2 项。查询不启动 worker、不调用模型、不打开 monitor，也不预留执行名额。
+
 每批任务开始时读取一次 TOML，整批共用该快照。修改模型、思考、重试、压缩及并发后，下一批生效，无须重连。修改配置路径或其他 MCP 启动参数后需重连。
 
 `monitor.terminal` 只选择执行 `cpi-monitor --open` 时使用的终端，不会自行触发开窗。macOS 可设 `"ghostty"` 或 `"terminal"`；Windows 可设 `"windows-terminal"` 或 `"mintty"`；Linux 可设 `"ghostty"`、`"gnome-terminal"`、`"konsole"`、`"xfce4-terminal"`、`"x-terminal-emulator"`、`"xterm"`。`"auto"` 保持原平台选择。指定终端不可用时报告错误，不改用其他终端。同一状态目录已有 monitor 时仍复用它；退出旧 monitor 后重新 `--open` 才会应用新终端。
@@ -357,6 +359,7 @@ worker 进入 `failed` 终态后，由主 agent 用自己的当前上下文接�
 
 | 接口 | 使用方式 |
 | --- | --- |
+| `get_capabilities` | 每个新批次规划前查询有效并发、来源和单批上限；不用于轮询任务状态 |
 | `delegate_batch` | 每批 1–4 项任务，等待整批终态后返回交接 |
 | `send_message` | 给活跃 worker 补充要求；`steer` 在工具边界处理，`followUp` 等当前轮结束 |
 | `read_handoff` | 重读当前连接已完成批次，不用于轮询状态 |

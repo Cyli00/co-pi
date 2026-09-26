@@ -10,6 +10,7 @@ import {
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
 import { readConfig, requireModel, resolveConfigPath, type CpiConfig } from "./config.js";
+import { DEFAULT_PARALLELISM, MAX_PARALLELISM, MAX_BATCH_TASKS } from "./limits.js";
 import { runtimeErrorGuidance, runtimeErrorSummary } from "./runtime-errors.js";
 import { StateStore } from "./store.js";
 import { bindStateThread } from "./state-thread.js";
@@ -73,7 +74,7 @@ export class Supervisor extends EventEmitter {
 
   constructor(readonly options: SupervisorOptions) {
     super();
-    if (!Number.isInteger(options.parallelism ?? 3) || (options.parallelism ?? 3) < 1 || (options.parallelism ?? 3) > 4) throw new CpiError("parallelism_invalid");
+    if (!Number.isInteger(options.parallelism ?? DEFAULT_PARALLELISM) || (options.parallelism ?? DEFAULT_PARALLELISM) < 1 || (options.parallelism ?? DEFAULT_PARALLELISM) > MAX_PARALLELISM) throw new CpiError("parallelism_invalid");
     options.threadId = bindStateThread(options.stateDir, options.threadId);
     this.store = new StateStore(options.stateDir);
     this.heartbeat = setInterval(() => {
@@ -84,6 +85,23 @@ export class Supervisor extends EventEmitter {
       void this.flush();
     }, 5_000);
     this.heartbeat.unref();
+  }
+
+  private async loadExecutionConfig(): Promise<CpiConfig | undefined> {
+    if (this.options.workerPath && !this.options.configPath) return undefined;
+    return readConfig(this.options.configPath ?? resolveConfigPath());
+  }
+
+  private executionCapabilities(config?: CpiConfig) {
+    return {
+      parallelism: this.options.parallelism ?? config?.runtime.parallelism ?? DEFAULT_PARALLELISM,
+      parallelism_source: this.options.parallelism !== undefined ? "cli" : config ? "config" : "default",
+      max_batch_size: MAX_BATCH_TASKS,
+    };
+  }
+
+  async getCapabilities() {
+    return this.executionCapabilities(await this.loadExecutionConfig());
   }
 
   async delegate(value: unknown, signal?: AbortSignal, reviewPermission?: PermissionReviewer): Promise<BatchResult> {
@@ -135,16 +153,13 @@ export class Supervisor extends EventEmitter {
 
   private async execute(batch: Batch, run: BatchRun): Promise<BatchResult> {
     this.changed(run.snapshot);
-    // 自定义 worker 不依赖 pi；默认 worker 在派生进程前检查共享配置。
-    if (!this.options.workerPath || this.options.configPath) {
-      try {
-        run.config = await readConfig(this.options.configPath ?? resolveConfigPath());
-        if (!this.options.workerPath) requireModel(run.config);
-      }
-      catch (error) {
-        for (const state of run.snapshot.tasks) this.finish(state, run.snapshot, errorCode(error));
-        return this.result(run.snapshot);
-      }
+    try {
+      run.config = await this.loadExecutionConfig();
+      if (!this.options.workerPath) requireModel(run.config!);
+    }
+    catch (error) {
+      for (const state of run.snapshot.tasks) this.finish(state, run.snapshot, errorCode(error));
+      return this.result(run.snapshot);
     }
     let cursor = 0;
     const consume = async () => {
@@ -158,7 +173,8 @@ export class Supervisor extends EventEmitter {
         await this.launch(batch, run, state);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(batch.tasks.length, this.options.parallelism ?? run.config?.runtime.parallelism ?? 3) }, consume));
+    const { parallelism } = this.executionCapabilities(run.config);
+    await Promise.all(Array.from({ length: Math.min(batch.tasks.length, parallelism) }, consume));
     return this.result(run.snapshot);
   }
 

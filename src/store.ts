@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CpiError, safeText, snapshotSchema, type Snapshot } from "./protocol.js";
+import { MAX_BATCH_TASKS } from "./limits.js";
 
 export { defaultStateDir } from "./state-directory.js";
 
@@ -27,9 +28,9 @@ const TASK_MESSAGE_UNITS = 128 * (80 + 8 + 9 + 40 + 80);
 const TOP_LEVEL_UNITS = 36 + 80 + 32_768 + 40;
 // 键名、引号、逗号等 JSON 结构开销的宽裕余量，取上界不影响合法快照。
 const STRUCTURE_BYTES = 256 * 1_024;
-// 最多 4 个任务；读写共用同一上限，写入端不会产出读取端会跳过的文件。
+// 读写共用任务上限，写入端不会产出读取端会跳过的文件。
 export const SNAPSHOT_MAX_BYTES = JSON_UNIT_BYTES
-  * (4 * (TASK_FIELD_UNITS + TASK_EVENT_UNITS + TASK_HANDOFF_UNITS + TASK_MESSAGE_UNITS) + TOP_LEVEL_UNITS)
+  * (MAX_BATCH_TASKS * (TASK_FIELD_UNITS + TASK_EVENT_UNITS + TASK_HANDOFF_UNITS + TASK_MESSAGE_UNITS) + TOP_LEVEL_UNITS)
   + STRUCTURE_BYTES;
 const SNAPSHOT_MAX_BYTES_BIGINT = BigInt(SNAPSHOT_MAX_BYTES);
 // safeText 会剥离 ANSI/控制序列；纯控制字符标题会被清成空串并触发 taskSchema 的 min(1)，

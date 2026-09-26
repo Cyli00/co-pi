@@ -105,13 +105,14 @@ args = ["E:/gitProjects/codex-subagents/dist/cli.js", "--agent-dir", "E:/pi-conf
 
 | 接口 | 用途 |
 | --- | --- |
+| `get_capabilities` | 每次规划新批次前读取当前有效并发、来源和单批上限，无 worker 或模型调用 |
 | `delegate_batch` | 提交 1–4 个任务，等待整批收尾后返回 handoff；默认并发 3 |
 | `send_message` | 给活跃 worker 补充新要求；支持 `steer`、`followUp`、消息 ID 去重和分阶段回执 |
 | `read_handoff` | 再次读取当前连接已完成批次的交接；不是状态查询接口 |
 
 源码中的参数示例见 [batch.json](../../../../examples/batch.json)。每项任务包含 `id`、`title`、`instruction`、`acceptance` 和可选 `mode`，默认 `coding`。顶层 `context` 承载主任务背景、文件分工和已有授权。`workspace` 必须是绝对路径。一个 MCP 连接同时执行一批，批内超过并发上限的任务排队。
 
-并发数通过 TOML 的 `runtime.parallelism` 设置，可用 `--parallelism 1..4` 临时覆盖。多个编码 worker 共用工作区，派发时要明确文件所有权。
+并发数通过 TOML 的 `runtime.parallelism` 设置，可用 `--parallelism 1..4` 临时覆盖。 `get_capabilities` 与派发调度共用配置加载及优先级解析，返回 `parallelism`、`parallelism_source` 和 `max_batch_size`。单批上限与并发独立，额外任务排队。查询每次重新读取配置，不预留名额、不改变活跃批次；查询后到派发前若配置发生变化，以派发时读取的快照为准。多个编码 worker 共用工作区，派发时要明确文件所有权。
 
 插件不会自动隔离 Git 分支。
 

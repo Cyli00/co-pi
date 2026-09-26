@@ -1,5 +1,6 @@
 import type { CpiConfig } from "./config.js";
 import { z } from "zod";
+import { MAX_BATCH_TASKS } from "./limits.js";
 import type { PermissionAction, PermissionDecision } from "./permission-approval.js";
 import {
   HANDOFF_ARRAY_MAX, HANDOFF_EVIDENCE_PATH_MAX, HANDOFF_MAX_BYTES, HANDOFF_NEXT_STEPS_MAX,
@@ -22,7 +23,7 @@ export const batchSchema = z.object({
   requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
   workspace: z.string().min(1),
   context: z.string().max(24_000).default(""),
-  tasks: z.array(taskSchema).min(1).max(4),
+  tasks: z.array(taskSchema).min(1).max(MAX_BATCH_TASKS),
 }).strict().refine(b => new Set(b.tasks.map(t => t.id)).size === b.tasks.length, "Task IDs must be unique");
 
 const shortText = z.string().min(HANDOFF_TEXT_MIN).max(HANDOFF_TEXT_MAX);
@@ -114,7 +115,7 @@ export const snapshotSchema = z.object({
     events: z.array(z.object({ id: z.string().max(200).optional(), final: z.boolean().optional(), at: z.string().datetime(), kind: z.string().max(40), text: z.string().max(4_000) })).max(200),
     omittedEvents: z.number().int().nonnegative(), handoff: handoffSchema.optional(), error: z.string().max(80).optional(),
     runtime: runtimeSchema.optional(), metrics: metricsSchema.optional(), messages: z.array(receiptSchema).max(128).optional(),
-  })).max(4),
+  })).max(MAX_BATCH_TASKS),
 });
 export interface WorkerStart {
   type: "start";

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { z } from "zod";
 import { CpiError } from "./protocol.js";
+import { DEFAULT_PARALLELISM, MAX_PARALLELISM } from "./limits.js";
 
 const integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const thinking = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -33,7 +34,7 @@ export const configSchema = z.object({
     reserve_tokens: integer.default(16_384),
     keep_recent_tokens: integer.default(20_000),
   }).strict().default({}),
-  runtime: z.object({ parallelism: z.number().int().min(1).max(4).default(3) }).strict().default({}),
+  runtime: z.object({ parallelism: z.number().int().min(1).max(MAX_PARALLELISM).default(DEFAULT_PARALLELISM) }).strict().default({}),
   monitor: z.object({ terminal: terminalSchema.default("auto") }).strict().default({}),
 }).strict();
 export type CpiConfig = z.infer<typeof configSchema>;

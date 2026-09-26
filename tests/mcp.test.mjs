@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +9,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { Supervisor } from '../dist/supervisor.js';
 import { temporary, task, waitFor } from './helpers.mjs';
+import { serializeConfig, validateConfig } from '../dist/config.js';
+import { MAX_BATCH_TASKS } from '../dist/limits.js';
 
 test('MCP 订阅进展与最终交接分层，未订阅也能交付', async t => {
   let supervisor, server, client;
@@ -23,7 +26,7 @@ test('MCP 订阅进展与最终交接分层，未订阅也能交付', async t =>
   assert.ok(instructions.includes(JSON.stringify(join(root, 'state'))));
   assert.ok(instructions.includes('cpi-monitor --open --state-dir'));
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(t => t.name), ['delegate_batch', 'send_message', 'read_handoff']);
+  assert.deepEqual(tools.map(t => t.name), ['get_capabilities', 'delegate_batch', 'send_message', 'read_handoff']);
   assert.ok(!/\p{Script=Han}/u.test(instructions));
   assert.ok(tools.every(tool => !/\p{Script=Han}/u.test(JSON.stringify(tool))));
   const progress = [];
@@ -49,6 +52,78 @@ test('MCP 订阅进展与最终交接分层，未订阅也能交付', async t =>
   controller.abort();
   await rejected;
   await cancelled;
+});
+
+test('MCP 能力查询读取最新配置和 CLI 覆盖，返回并发与单批上限且不启动任务', async t => {
+  for (const override of [undefined, 1]) await t.test(`CLI override: ${override ?? 'none'}`, async t => {
+    let supervisor, server, client;
+    const root = temporary(t, async () => { await supervisor?.close(); await client?.close(); await server?.close(); });
+    const path = join(root, 'config.toml');
+    const save = n => writeFile(path, serializeConfig(validateConfig({ runtime: { parallelism: n } })));
+    await save(2);
+    supervisor = new Supervisor({ agentDir: root, stateDir: join(root, 'state'), configPath: path, parallelism: override,
+      workerPath: fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url)) });
+    server = createMcpServer(supervisor);
+    client = new Client({ name: 'capabilities-test', version: '1' });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a); await client.connect(b);
+    let progressCount = 0, maxRunning = 0;
+    supervisor.on('progress', s => {
+      progressCount++;
+      maxRunning = Math.max(maxRunning, s.tasks.filter(t => ['starting', 'running'].includes(t.phase)).length);
+    });
+    const query = async () => {
+      const result = await client.callTool({ name: 'get_capabilities', arguments: {} });
+      assert.equal(result.isError, false);
+      return JSON.parse(result.content[0].text);
+    };
+    const expected = n => ({ parallelism: override ?? n, parallelism_source: override === undefined ? 'config' : 'cli', max_batch_size: MAX_BATCH_TASKS });
+    const before = await readFile(path, 'utf8');
+    const files = await readdir(root);
+    assert.deepEqual(await query(), expected(2));
+    assert.equal(progressCount, 0);
+    assert.equal(await readFile(path, 'utf8'), before);
+    assert.deepEqual(await readdir(root), files);
+    await save(3);
+    assert.deepEqual(await query(), expected(3));
+    const { tools } = await client.listTools();
+    const capabilityTool = tools.find(t => t.name === 'get_capabilities');
+    assert.equal(capabilityTool.annotations.readOnlyHint, true);
+    assert.equal(capabilityTool.annotations.openWorldHint, false);
+    const delegateTool = tools.find(t => t.name === 'delegate_batch');
+    assert.equal(delegateTool.inputSchema.properties.tasks.maxItems, MAX_BATCH_TASKS);
+    assert.match(delegateTool.description, /get_capabilities/);
+    assert.match(client.getInstructions(), /get_capabilities/);
+    const output = await client.callTool({ name: 'delegate_batch', arguments: {
+      requestId: 'capacity', workspace: root, tasks: Array.from({ length: MAX_BATCH_TASKS }, (_, i) => task(`task-${i}`)),
+    } });
+    assert.equal(output.isError, false);
+    assert.equal(maxRunning, override ?? 3);
+    assert.equal(JSON.parse(output.content[0].text).tasks.length, MAX_BATCH_TASKS);
+  });
+});
+
+test('MCP 能力查询与派发对缺失、损坏配置报同一错误，失败不回退或泄露原文', async t => {
+  let supervisor, server, client;
+  const root = temporary(t, async () => { await supervisor?.close(); await client?.close(); await server?.close(); });
+  const path = join(root, 'config.toml');
+  supervisor = new Supervisor({ agentDir: root, stateDir: join(root, 'state'), configPath: path });
+  server = createMcpServer(supervisor);
+  client = new Client({ name: 'invalid-capabilities', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a); await client.connect(b);
+  for (const [id, code, text] of [
+    ['missing', 'cpi_config_missing', undefined],
+    ['invalid', 'cpi_config_invalid', 'password = "DO_NOT_DISCLOSE"'],
+  ]) {
+    if (text) await writeFile(path, text);
+    const response = await client.callTool({ name: 'get_capabilities', arguments: {} });
+    assert.equal(response.isError, true);
+    assert.equal(JSON.parse(response.content[0].text).error, code);
+    assert.ok(!JSON.stringify(response).includes('DO_NOT_DISCLOSE'));
+    const batch = await client.callTool({ name: 'delegate_batch', arguments: { requestId: id, workspace: root, tasks: [task('one')] } });
+    assert.equal(JSON.parse(batch.content[0].text).tasks[0].error, code);
+  }
 });
 
 test('原委派调用在全部 worker 结束后一次返回完整 handoff，无需查询状态', async t => {
