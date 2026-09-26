@@ -1,3 +1,4 @@
+import { readConfig } from "../dist/config.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -9,11 +10,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { inheritedSettings } from '../dist/settings.js';
 import { readSnapshots } from '../dist/store.js';
-import { temporary, task, handoff, platformSettings } from './helpers.mjs';
+import { writeTestConfig, temporary, task, handoff, platformSettings } from './helpers.mjs';
 import { safetyInstructions, workerInstructions } from '../dist/instructions.js';
 import { hasUv } from '../dist/platform.js';
 
-test('真实 pi SDK 经 MCP stdio 继承配置、执行工具并交付 handoff（仅本地模拟模型）', { timeout: 60_000 }, async t => {
+test('真实 pi SDK 经 MCP stdio 使用 TOML 覆盖 pi 默认配置、执行工具并交付 handoff（仅本地模拟模型）', { timeout: 60_000 }, async t => {
   let client, server;
   const root = temporary(t, async () => {
     await client?.close();
@@ -70,10 +71,14 @@ test('真实 pi SDK 经 MCP stdio 继承配置、执行工具并交付 handoff�
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
     models: [{ id: 'test-model', reasoning: true, contextWindow: 32000, maxTokens: 4000 }],
   } } }));
+  const configPath = writeTestConfig(agentDir);
+  const changedPiSettings = { ...settings, defaultProvider: 'wrong', defaultModel: 'wrong',
+    defaultThinkingLevel: 'off', modelThinkingLevels: { 'cpi-local-test/test-model': 'off' } };
+  writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(changedPiSettings));
   client = new Client({ name: 'sdk-test', version: '1' });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--agent-dir', agentDir, '--state-dir', stateDir, '--task-timeout-ms', '45000'],
+    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--config', configPath, '--agent-dir', agentDir, '--state-dir', stateDir, '--task-timeout-ms', '45000'],
     stderr: 'pipe',
   });
   // 错误正文不回显；失败时仅断言协议中的固定错误码。
@@ -105,14 +110,14 @@ test('真实 pi SDK 经 MCP stdio 继承配置、执行工具并交付 handoff�
   assert.equal(snapshot.tasks[0].model, 'cpi-local-test/test-model');
   assert.equal(snapshot.tasks[0].thinking, 'high');
   assert.ok(snapshot.tasks[0].events.some(e => e.kind === 'tool_end' && e.text.startsWith('write')));
-  assert.deepEqual(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')), settings);
+  assert.deepEqual(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')), changedPiSettings);
 });
 
 test('配置缺失拒绝启动，内存设置修改不回写原文件', async t => {
   const root = temporary(t);
-  await assert.rejects(inheritedSettings(root), /pi_settings_unreadable/);
+  await assert.rejects(readConfig(join(root, "missing.toml")), /cpi_config_missing/);
   writeFileSync(join(root, 'settings.json'), JSON.stringify({ ...platformSettings, defaultProvider: 'local', defaultModel: 'configured', defaultThinkingLevel: 'high' }));
-  const manager = await inheritedSettings(root);
+  const manager = await inheritedSettings(root, await readConfig(writeTestConfig(root)));
   manager.setDefaultModel('memory-only');
   await manager.flush();
   assert.equal(JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8')).defaultModel, 'configured');

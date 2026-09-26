@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { readSnapshots } from '../dist/store.js';
-import { temporary, task, handoff, platformSettings } from './helpers.mjs';
+import { writeTestConfig, temporary, task, handoff, platformSettings } from './helpers.mjs';
 
 for (const mode of ['accept', 'deny', 'unverified', 'invalid-content', 'unsupported', 'cancel', 'deny-linked-parent', 'deny-continuation']) {
   test(`真实 pi shell → IPC → MCP 审批 → 执行：${mode}`, { timeout: 45_000 }, async t => {
@@ -92,7 +92,7 @@ for (const mode of ['accept', 'deny', 'unverified', 'invalid-content', 'unsuppor
         ...(mode === 'unverified' ? {} : { _meta: { approvals_reviewer: 'auto_review' } }) };
     });
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--agent-dir', agent, '--state-dir', join(root, 'state'), '--task-timeout-ms', '30000'],
+      args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state'), '--task-timeout-ms', '30000'],
       stderr: 'pipe',
     });
     transport.stderr?.resume();

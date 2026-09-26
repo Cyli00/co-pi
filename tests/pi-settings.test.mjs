@@ -10,7 +10,7 @@ import { readSnapshots } from '../dist/store.js';
 import { MonitorStyle, renderFeed } from '../dist/monitor-view.js';
 import { readPiSettings } from '../dist/pi-settings.js';
 import { piSetupGuidance } from '../scripts/install.mjs';
-import { temporary, task } from './helpers.mjs';
+import { writeTestConfig, temporary, task } from './helpers.mjs';
 
 test('缺省模型在 MCP 派发时预检失败，无 worker 启动，交接和时间线提供保存指引', async t => {
   let supervisor, server, client;
@@ -18,7 +18,7 @@ test('缺省模型在 MCP 派发时预检失败，无 worker 启动，交接和�
   await writeFile(join(root, 'settings.json'), '{}');
   // 若加载 SDK 认证，此目录会触发错误；预检应在这之前结束。
   await mkdir(join(root, 'auth.json'));
-  supervisor = new Supervisor({ agentDir: root, stateDir: join(root, 'state') });
+  supervisor = new Supervisor({ configPath: writeTestConfig(root), agentDir: root, stateDir: join(root, 'state') });
   server = createMcpServer(supervisor);
   client = new Client({ name: 'settings-test', version: '1' });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -30,13 +30,13 @@ test('缺省模型在 MCP 派发时预检失败，无 worker 启动，交接和�
   const output = JSON.parse(response.content[0].text);
   assert.ok(!phases.includes('starting') && !phases.includes('running'));
   for (const item of output.tasks) {
-    assert.equal(item.error, 'pi_default_model_required');
+    assert.equal(item.error, 'cpi_model_required');
     assert.equal(item.status, 'failed');
-    assert.match(item.guidance, /\/model.*Ctrl\+S.*\/thinking.*Ctrl\+S/);
+    assert.match(item.guidance, /config.toml.*provider/);
   }
   const [snapshot] = readSnapshots(join(root, 'state'));
   assert.equal(snapshot.closed, true);
-  assert.match(renderFeed(snapshot.tasks[0], 100, 'stages', false, new MonitorStyle(false)).join('\n'), /Ctrl\+S/);
+  assert.match(renderFeed(snapshot.tasks[0], 100, 'stages', false, new MonitorStyle(false)).join('\n'), /config.toml/);
   const historical = { ...snapshot.tasks[0], events: [{ at: new Date().toISOString(), kind: 'runtime', text: 'pi_default_model_required' }] };
   assert.match(renderFeed(historical, 100, 'stages', false, new MonitorStyle(false)).join('\n'), /\/model/);
   assert.equal(await readFile(join(root, 'settings.json'), 'utf8'), '{}');

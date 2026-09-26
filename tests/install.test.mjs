@@ -9,7 +9,7 @@ import { WINDOWS_SHELL, validateShell } from '../dist/platform.js';
 import { workerInstructions, safetyInstructions } from '../dist/instructions.js';
 import { WINDOWS_SHELL as installerShell, supportedNode, preflight as installerPreflight, configurePi, install, mcpConfig } from '../scripts/install.mjs';
 
-const preflight = options => installerPreflight({ ...options, binDir: join(options.agentDir, 'commands') });
+const preflight = options => installerPreflight({ ...options, configPath: join(options.agentDir, "co-pi-config.toml"), binDir: join(options.agentDir, 'commands') });
 
 const available = (command, args) => command === 'uv' ? 'uv 0.5.9' : args.at(-1)?.includes('BASH_VERSION') ? '5.2.37(1)-release\ngit version 2.49.0.windows.1' : '10.9.0';
 

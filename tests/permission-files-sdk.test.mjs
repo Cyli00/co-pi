@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { temporary, task, handoff, platformSettings } from './helpers.mjs';
+import { writeTestConfig, temporary, task, handoff, platformSettings } from './helpers.mjs';
 
 for (const [name, outside, approve] of [
   ['write', false, false], ['edit', false, false], ['bash', false, false],
@@ -68,7 +68,7 @@ for (const [name, outside, approve] of [
     return { action: approve ? 'accept' : 'decline', content: {}, _meta: { approvals_reviewer: 'auto_review' } };
   });
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--agent-dir', agent, '--state-dir', join(root, 'state')], stderr: 'pipe' });
+    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state')], stderr: 'pipe' });
   transport.stderr?.resume();
   await client.connect(transport);
   const response = await client.callTool({ name: 'delegate_batch', arguments: { requestId: 'files', workspace,

@@ -7,12 +7,13 @@ const acceptedMarkers = [marker, 'codex-pi-subagents monitor launcher v1'];
 const quoteSh = value => `'${value.replaceAll("'", "'\\''")}'`;
 const quoteCmd = value => `"${value.replaceAll('%', '%%')}"`;
 
-export function monitorCommandPlan({ platform, prefix, binDir, root, node = process.execPath, pathValue = process.env.PATH ?? '' }) {
+export function monitorCommandPlan({ platform, prefix, binDir, root, configPath, node = process.execPath, pathValue = process.env.PATH ?? '' }) {
   const directory = resolve(binDir ?? (platform === 'win32' ? prefix : join(prefix, 'bin')));
   const entry = join(root, 'dist', 'monitor-cli.js');
   const shellPath = path => process.platform === 'win32' ? path.replaceAll('\\', '/') : path;
-  const files = [{ name: 'cpi-monitor', content: `#!/bin/sh\n# ${marker}\nexec ${quoteSh(shellPath(node))} ${quoteSh(shellPath(entry))} "$@"\n` }];
-  if (platform === 'win32') files.push({ name: 'cpi-monitor.cmd', content: `@echo off\r\nrem ${marker}\r\nsetlocal DisableDelayedExpansion\r\n${quoteCmd(node)} ${quoteCmd(entry)} %*\r\nexit /b %errorlevel%\r\n` });
+  const configArgs = configPath ? ` --config ${quoteSh(shellPath(configPath))}` : '';
+  const files = [{ name: 'cpi-monitor', content: `#!/bin/sh\n# ${marker}\nexec ${quoteSh(shellPath(node))} ${quoteSh(shellPath(entry))}${configArgs} "$@"\n` }];
+  if (platform === 'win32') files.push({ name: 'cpi-monitor.cmd', content: `@echo off\r\nrem ${marker}\r\nsetlocal DisableDelayedExpansion\r\n${quoteCmd(node)} ${quoteCmd(entry)}${configPath ? ` --config ${quoteCmd(configPath)}` : ''} %*\r\nexit /b %errorlevel%\r\n` });
   const normalize = path => {
     const normalized = resolve(path).replaceAll('\\', '/').replace(/\/$/, '');
     return platform === 'win32' ? normalized.toLowerCase() : normalized;

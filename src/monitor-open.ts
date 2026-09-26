@@ -8,11 +8,28 @@ import { setTimeout as delay } from "node:timers/promises";
 import { acquireMonitorInstance, canonicalStateDirectory, findMonitorInstance, type InstanceLease } from "./monitor-instance.js";
 import { safeText } from "./protocol.js";
 import { WINDOWS_SHELL } from "./platform.js";
+import type { MonitorTerminal } from "./config.js";
 
 export const quoteShell = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 export type TerminalCommand = { command: string; args: string[] };
 
-export function terminalCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, script: string): TerminalCommand[] {
+export function terminalCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, script: string, terminal: MonitorTerminal = "auto"): TerminalCommand[] {
+  if (terminal !== "auto") {
+    if (platform === "darwin") {
+      if (env.SSH_CONNECTION || env.SSH_TTY) throw new Error("monitor_desktop_unavailable");
+      if (terminal === "ghostty") return [{ command: "/usr/bin/open", args: ["-n", "-a", "Ghostty", "--args", "-e", "/bin/sh", script] }];
+      if (terminal !== "terminal") throw new Error("monitor_terminal_platform_mismatch");
+    } else if (platform === "win32") {
+      if (!["windows-terminal", "mintty"].includes(terminal)) throw new Error("monitor_terminal_platform_mismatch");
+      return terminalCandidates(platform, env, script).filter(candidate => terminal === "mintty" ? candidate.command.endsWith("mintty.exe") : candidate.command === "wt.exe");
+    } else if (platform === "linux") {
+      if (!env.DISPLAY && !env.WAYLAND_DISPLAY) throw new Error("monitor_desktop_unavailable");
+      if (terminal === "ghostty") return [{ command: "ghostty", args: ["-e", "/bin/sh", script] }];
+      const selected = terminalCandidates(platform, env, script).filter(candidate => candidate.command === terminal);
+      if (!selected.length) throw new Error("monitor_terminal_platform_mismatch");
+      return selected;
+    } else throw new Error("monitor_platform_unsupported");
+  }
   if (platform === "win32") return [
     { command: "wt.exe", args: ["-w", "new", "new-tab", "--title", "co-pi monitor", WINDOWS_SHELL, "--noprofile", "--norc", script] },
     { command: "C:\\Git\\usr\\bin\\mintty.exe", args: ["--title", "co-pi monitor", WINDOWS_SHELL, "--noprofile", "--norc", script] },
@@ -70,6 +87,7 @@ export async function launchTerminal(candidates: TerminalCommand[], env = proces
 export type OpenMonitorOptions = {
   stateDir: string; entry: string; args?: string[]; node?: string; platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv; timeoutMs?: number; tempRoot?: string;
+  terminal?: MonitorTerminal;
   launch?: (commands: TerminalCommand[]) => Promise<ChildProcess | undefined>;
 };
 
@@ -92,14 +110,14 @@ export async function openMonitor(options: OpenMonitorOptions): Promise<"opened"
       const env = options.env ?? process.env;
       // 先检查桌面环境，避免在无桌面的 SSH/CI 中创建启动脚本。
       stage = "桌面环境检查";
-      terminalCandidates(platform, env, "");
+      terminalCandidates(platform, env, "", options.terminal);
       stage = "启动脚本写入";
       directory = await mkdtemp(join(options.tempRoot ?? tmpdir(), "cpi-monitor-"));
       const script = join(directory, "monitor.command");
       await writeFile(script, monitorScript(options.node ?? process.execPath, options.entry,
         ["--state-dir", root, ...options.args ?? [], "--open-token", token], platform), { mode: 0o700 });
       await chmod(script, 0o700);
-      const candidates = terminalCandidates(platform, env, script);
+      const candidates = terminalCandidates(platform, env, script, options.terminal);
       stage = "终端启动";
       child = await (options.launch ? options.launch(candidates) : launchTerminal(candidates, env));
       child?.on("error", () => { failed = "spawn_error"; });
@@ -136,6 +154,7 @@ export function describeMonitorError(error: unknown): string {
     monitor_desktop_unavailable: "当前环境没有可用桌面会话。",
     monitor_platform_unsupported: "当前平台不支持自动打开终端。",
     monitor_terminal_unavailable: "未找到可启动的终端。",
+    monitor_terminal_platform_mismatch: "config.toml 中的终端不适用于当前平台。",
     monitor_terminal_failed: "终端启动失败。",
     monitor_open_timeout: "等待监控就绪超时，未确认启动成功。",
     monitor_open_failed: "另一个监控启动请求未成功。",

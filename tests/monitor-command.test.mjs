@@ -49,7 +49,7 @@ test('预检保护其他同名命令，Windows PowerShell 优先文件冲突也�
 test('安装完成才注册命令；构建失败不触发注册，PATH 缺失可检测', async t => {
   const root = temporary(t);
   const calls = [];
-  const plan = { platform: 'linux', monitor: monitorCommandPlan({ platform: 'linux', prefix: root, root, pathValue: '' }) };
+  const plan = { configPath: join(root, 'config.toml'), settings: {}, platform: 'linux', monitor: monitorCommandPlan({ platform: 'linux', prefix: root, root, pathValue: '' }) };
   assert.equal(plan.monitor.inPath, false);
   const hooks = {
     build: async () => calls.push('build'), configure: async () => { calls.push('configure'); return {}; },

@@ -1,3 +1,4 @@
+import type { CpiConfig } from "./config.js";
 import { z } from "zod";
 import type { PermissionAction, PermissionDecision } from "./permission-approval.js";
 import {
@@ -117,6 +118,7 @@ export const snapshotSchema = z.object({
 });
 export interface WorkerStart {
   type: "start";
+  config?: CpiConfig;
   task: Task;
   workspace: string;
   context: string;

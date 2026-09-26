@@ -1,3 +1,4 @@
+import { readConfig } from "../dist/config.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -7,7 +8,7 @@ import { join } from 'node:path';
 import { Supervisor } from '../dist/supervisor.js';
 import { MonitorStyle, renderFeed } from '../dist/monitor-view.js';
 import { inheritedSettings } from '../dist/settings.js';
-import { temporary, task, handoff, waitFor, platformSettings } from './helpers.mjs';
+import { writeTestConfig, temporary, task, handoff, waitFor, platformSettings } from './helpers.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function stream(res, { text, calls, input = 100, output = 20 }) {
@@ -48,7 +49,7 @@ async function setup(t, handler, { extension = '', settings: overrides = {} } = 
   } else writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { 'cpi-test': provider } }));
   writeFileSync(join(agentDir, 'auth.json'), '{}');
   writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(settings));
-  supervisor = new Supervisor({ agentDir, stateDir: join(root, 'state'), taskTimeoutMs: 30_000 });
+  supervisor = new Supervisor({ configPath: writeTestConfig(agentDir), agentDir, stateDir: join(root, 'state'), taskTimeoutMs: 30_000 });
   const snapshots = [];
   supervisor.on('progress', snapshot => snapshots.push(structuredClone(snapshot)));
   const approvals = [];
@@ -214,9 +215,9 @@ test('真实 SDK 自动重试与压缩可观察，agent_end 不会提前交付',
 test('配置接受 max，同时拒绝非法模型专属强度', async t => {
   const root = temporary(t);
   writeFileSync(join(root, 'settings.json'), JSON.stringify({ ...platformSettings, defaultProvider: 'test', defaultModel: 'test', defaultThinkingLevel: 'max', modelThinkingLevels: { 'test/test': 'max' } }));
-  assert.equal((await inheritedSettings(root)).getDefaultThinkingLevel(), 'max');
+  assert.equal((await inheritedSettings(root, await readConfig(writeTestConfig(root)))).getDefaultThinkingLevel(), 'max');
   writeFileSync(join(root, 'settings.json'), JSON.stringify({ defaultProvider: 'test', defaultModel: 'test', modelThinkingLevels: { 'test/test': 'invalid' } }));
-  await assert.rejects(inheritedSettings(root), /pi_thinking_invalid/);
+  assert.throws(() => writeTestConfig(root), /cpi_config_invalid/);
 });
 
 test('流式公开文本与 SDK 思考进入监控，思考默认折叠且不进入 handoff', { timeout: 45_000 }, async t => {

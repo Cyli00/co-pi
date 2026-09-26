@@ -40,7 +40,7 @@ const READ_ONLY_TOOL_NAMES: readonly string[] = ["read", "grep", "find", "ls", .
 const SHELL_AND_FILE_TOOL_NAMES: readonly string[] = ["bash", ...FILE_TOOL_NAMES];
 
 export async function runWorker(start: WorkerStart): Promise<void> {
-  const settingsManager = await inheritedSettings(start.agentDir);
+  const settingsManager = await inheritedSettings(start.agentDir, start.config);
   const policy = await createPermissionPolicy(start.workspace);
   function recoverableTool(tool: ToolDefinition<any, any, any>): ToolDefinition<any, any, any> {
     const execute = tool.execute;

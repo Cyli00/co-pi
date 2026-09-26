@@ -13,49 +13,17 @@
 
 ## 模型配置
 
-### 直接修改默认模型和思考强度
+### co-pi TOML 模型设置
 
-编辑 `~/.pi/agent/settings.json`，合并以下字段。`my-provider` 和 `my-model-id` 是占位符，替换为 pi `/model` 中对应的供应商 ID、模型 ID，或下面自定义模型配置中的实际值：
+worker 使用 `~/.cpi/config.toml` 的 `[model]`、`[retry]` 和 `[compaction]`。完整示例及终端、并发选项见 [co-pi 配置](../../../../README.md#co-pi-配置)。
 
-```json
-{
-  "defaultProvider": "my-provider",
-  "defaultModel": "my-model-id",
-  "defaultThinkingLevel": "high"
-}
-```
+首次安装从 pi settings.json 迁移白名单字段，展开当前模型的专属思考强度和压缩参数；已有 TOML 不覆盖。之后修改 pi 默认模型、强度、重试或压缩不会改变 co-pi。
 
-| 字段 | 含义 |
-| --- | --- |
-| `defaultProvider` | 供应商的精确 ID；自定义服务时对应 `models.json` 中 `providers` 下的键 |
-| `defaultModel` | 该供应商下模型的精确 `id`，不是界面显示名；不额外拼接供应商前缀 |
-| `defaultThinkingLevel` | 全局默认思考强度；接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
-| `modelThinkingLevels` | 可选的模型专属强度映射，键为精确的 `供应商ID/模型ID`；优先于全局默认值 |
-
-例如，全局默认 `medium`，但当前选中的模型固定使用 `high`：
-
-```json
-{
-  "defaultProvider": "my-provider",
-  "defaultModel": "my-model-id",
-  "defaultThinkingLevel": "medium",
-  "modelThinkingLevels": {
-    "my-provider/my-model-id": "high"
-  }
-}
-```
-
-worker 的实际解析顺序是：模型专属值 → 全局默认值 → 锁定版本 SDK 的默认值 `medium` → 按模型能力调整。因此，只修改 `defaultThinkingLevel`，已有的模型专属值仍然优先。
-
-要统一强度，需要同时调整或移除对应映射。非推理模型或不支持某档位的模型可能得到不同的有效值，monitor 会显示实际生效的强度。
-
-全局值和模型专属映射均校验上述档位。
-
-`max` 是否实际可用仍由模型能力决定。
+每个批次读取配置快照并传给所有 worker，再构造 SDK 内存设置。`model.thinking` 接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，按模型能力调整，monitor 显示有效强度。
 
 ### 自定义供应商或 API 地址
 
-使用已经可用的 pi 内置供应商时可以跳过此节。自定义服务需在 `~/.pi/agent/models.json` 中添加定义，再用 `settings.json` 选中它。例如：
+使用已经可用的 pi 内置供应商时可以跳过此节。自定义服务需在 `~/.pi/agent/models.json` 中添加定义，再用 co-pi `config.toml` 的 `model.provider` 和 `model.id` 选中它。例如：
 
 ```json
 {
@@ -107,9 +75,9 @@ args = ["E:/gitProjects/codex-subagents/dist/cli.js", "--agent-dir", "E:/pi-conf
 
 此时会读取 `E:/pi-config/agent/settings.json`、`auth.json` 和 `models.json`。给 pi CLI 配置这套目录时，在 Git Bash 使用 `PI_CODING_AGENT_DIR='E:/pi-config/agent' ./node_modules/.bin/pi`。
 
-每个新 worker 启动时重新加载设置。
+每个批次重新读取 co-pi TOML，worker 启动时另行加载 pi 资源设置。
 
-已运行的 worker 不会中途切换模型。为保证一批任务使用一致配置，请在上一批全部结束后修改设置，再提交下一批。修改 MCP 启动参数或环境变量后，需要重新连接 MCP / 重启 Codex。worker 不合并目标项目的 `.pi/settings.json`，所以修改项目级模型设置不会改变这些默认值。
+已运行的 worker 不会中途切换模型。批内使用同一份 TOML 快照，配置修改在下一批生效。修改 MCP 启动参数或环境变量后，需要重新连接 MCP / 重启 Codex。worker 不合并目标项目的 `.pi/settings.json`，所以修改项目级模型设置不会改变这些默认值。
 
 ## 任务与通信
 
@@ -143,7 +111,7 @@ args = ["E:/gitProjects/codex-subagents/dist/cli.js", "--agent-dir", "E:/pi-conf
 
 源码中的参数示例见 [batch.json](../../../../examples/batch.json)。每项任务包含 `id`、`title`、`instruction`、`acceptance` 和可选 `mode`，默认 `coding`。顶层 `context` 承载主任务背景、文件分工和已有授权。`workspace` 必须是绝对路径。一个 MCP 连接同时执行一批，批内超过并发上限的任务排队。
 
-并发数通过 `--parallelism 1..4` 设置。多个编码 worker 共用工作区，派发时要明确文件所有权。
+并发数通过 TOML 的 `runtime.parallelism` 设置，可用 `--parallelism 1..4` 临时覆盖。多个编码 worker 共用工作区，派发时要明确文件所有权。
 
 插件不会自动隔离 Git 分支。
 
@@ -225,7 +193,7 @@ worker 使用 `report_progress` 上报公开进展，使用 `submit_handoff` 提
 
 执行时遵循以下约定：
 
-- `settings.json` 加载为内存副本；模型缺失时直接失败，避免静默选择其他供应商。全局的 retry、compaction、skills、extensions 等仍交给 pi 资源加载器处理。
+- pi `settings.json` 加载为内存副本后，用 co-pi TOML 完整替换模型、强度、retry 和 compaction，清除 pi 的模型专属覆盖。skills、extensions 等继续交给 pi 资源加载器处理。模型缺失时直接失败，不切换供应商。
 - worker 不回写全局设置。会话使用内存存储，不持久化完整模型会话；监控快照会保留有界、脱敏后的 SDK 思考文本供展开查看。认证刷新和模型缓存仍遵循 pi SDK 的行为，模型目录缓存使用标准 `~/.pi/agent/models-store.json`（`--agent-dir` 会一并改变目录）。
 - 初始化先通过 `createAgentSessionServices` 加载资源并注册扩展供应商，再解析指定模型；通过 `bindExtensions` 以无交互界面的模式执行 `session_start`。扩展加载、启动或运行失败会报告固定错误码，不输出原始异常内容。需要交互确认或自定义 TUI 的扩展不能依赖 monitor 提供界面。
 - 编码模式继承 pi 的 `defaultTools` 和扩展工具，同时保留 `report_progress`、`submit_handoff`。未配置 `defaultTools` 时使用 pi 默认内置工具。扩展不得覆盖内置工具与通信保留名。
@@ -343,7 +311,7 @@ sandbox_mode = "workspace-write"
 
 3 秒仍未退出则尝试回收进程树。取消不撤销文件修改，任意 shell 命令自行脱离的外部进程不保证被回收。硬杀宿主不会恢复任务，monitor 在心跳过期后显示“连接失联·状态未知”。没有自动重跑整项收费任务或切换模型的降级路径。
 
-单次请求的自动重试仍遵循 pi 设置。
+单次请求的自动重试使用 co-pi TOML 的 retry 设置。
 
 编码模式按当前用户权限执行。工作目录、read-only 工具列表和提示不是操作系统级沙箱。
 

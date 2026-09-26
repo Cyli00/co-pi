@@ -9,7 +9,7 @@ import {
   type MessageMode, type MessageReceipt,
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
-import { readPiSettings } from "./pi-settings.js";
+import { readConfig, requireModel, resolveConfigPath, type CpiConfig } from "./config.js";
 import { runtimeErrorGuidance, runtimeErrorSummary } from "./runtime-errors.js";
 import { StateStore } from "./store.js";
 import { bindStateThread } from "./state-thread.js";
@@ -21,6 +21,7 @@ export interface SupervisorOptions {
   threadId?: string;
   agentDir: string;
   parallelism?: number;
+  configPath?: string;
   taskTimeoutMs?: number;
   shutdownMs?: number;
   workerPath?: string;
@@ -41,6 +42,7 @@ export interface BatchResult {
   }[];
 }
 interface BatchRun {
+  config?: CpiConfig;
   hash: string;
   snapshot: Snapshot;
   controller: AbortController;
@@ -134,8 +136,11 @@ export class Supervisor extends EventEmitter {
   private async execute(batch: Batch, run: BatchRun): Promise<BatchResult> {
     this.changed(run.snapshot);
     // 自定义 worker 不依赖 pi；默认 worker 在派生进程前检查共享配置。
-    if (!this.options.workerPath) {
-      try { await readPiSettings(this.options.agentDir); }
+    if (!this.options.workerPath || this.options.configPath) {
+      try {
+        run.config = await readConfig(this.options.configPath ?? resolveConfigPath());
+        if (!this.options.workerPath) requireModel(run.config);
+      }
       catch (error) {
         for (const state of run.snapshot.tasks) this.finish(state, run.snapshot, errorCode(error));
         return this.result(run.snapshot);
@@ -153,7 +158,7 @@ export class Supervisor extends EventEmitter {
         await this.launch(batch, run, state);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(batch.tasks.length, this.options.parallelism ?? 3) }, consume));
+    await Promise.all(Array.from({ length: Math.min(batch.tasks.length, this.options.parallelism ?? run.config?.runtime.parallelism ?? 3) }, consume));
     return this.result(run.snapshot);
   }
 
@@ -354,7 +359,7 @@ export class Supervisor extends EventEmitter {
         else stop("worker_process_error");
       });
       child.once("exit", code => complete(code === 0 ? undefined : "worker_exit_error"));
-      void this.send(child, { type: "start", task: state.task, workspace: batch.workspace, context: batch.context, agentDir: this.options.agentDir })
+      void this.send(child, { type: "start", task: state.task, workspace: batch.workspace, context: batch.context, config: run.config, agentDir: this.options.agentDir })
         .catch(() => stop("worker_input_failed"));
       if (run.controller.signal.aborted) cancel();
     });

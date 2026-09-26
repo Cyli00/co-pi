@@ -10,7 +10,7 @@
 | 主 agent 接管 | worker 失败后，主 agent 用自己的上下文完成剩余任务 |
 | 权限检查 | 工作区路径与 Bash AST 检查，外部访问和未知范围进入 Codex 审批 |
 | 终端监控 | 自动开窗，查看时间线、交接、模型用量和主线程 cache-hit |
-| 配置继承 | 沿用 pi 的模型、认证、思考强度及扩展 |
+| 配置 | co-pi TOML 管理模型、思考强度、重试、压缩、并发及终端；pi 提供认证与扩展 |
 | 跨平台安装 | Windows、macOS、Linux 共用安装器，支持源码和预编译运行包 |
 
 ## 极速上手：三步跑通
@@ -34,20 +34,11 @@ Windows PowerShell 7 可在项目目录直接运行统一入口：`pwsh -NoProfi
 
 ### 2. 配置 worker 模型
 
-在刚才的目录运行：
+安装器首次创建 `~/.cpi/config.toml` 时，会迁移 pi 已保存的模型、思考强度、重试和上下文压缩设置。已有 TOML 时逐字保留，不再次导入或覆盖。
 
-```bash
-./node_modules/.bin/pi
-```
+如果安装时 pi 尚未配置模型，TOML 中的 `model.provider` 和 `model.id` 为空。先运行 `./node_modules/.bin/pi`，通过 `/login` 配置认证，再把供应商和模型 ID 填入 TOML。未填写时返回 `cpi_model_required`，不会请求模型服务。修改 pi 默认模型不会再改变 co-pi 的模型。
 
-在 pi 中完成以下步骤：
-
-1. `/login`：登录所用供应商。
-2. `/model`：选择模型，**按 Ctrl+S 确认并保存默认模型**。
-3. `/thinking`：选择思考强度，**按 Ctrl+S 确认并保存默认思考强度**。
-4. 退出并重开 pi，确认模型和思考强度仍然正确，再发送一个简单请求验证认证。
-
-仅选择模型或只在当前会话切换不会保存默认值。未保存默认模型时，co-pi 会在创建 worker 前返回 `pi_default_model_required`，不会请求模型服务。已有配置也应先确认保存了默认值；安装成功不代表模型配置已经完成。
+完整字段见下方[co-pi 配置](#co-pi-配置)。
 
 ### 3. 接入 Codex，运行第一个任务
 
@@ -65,6 +56,7 @@ $co-pi 派发一个 read-only 任务，阅读当前项目的 README 和 package.
 
 - [安装前准备](#安装前准备)
 - [获取项目与安装](#获取项目与安装)
+- [co-pi 配置](#co-pi-配置)
 - [配置 pi](#配置-pi)
 - [接入 Codex 与 monitor](#接入-codex-与-monitor)
 - [任务、通信与权限](#任务通信与权限)
@@ -138,6 +130,7 @@ Windows 仍需将 Git for Windows 安装到 `C:\Git`；安装器会用其中的 
 | 参数 | 默认值 / 行为 |
 | --- | --- |
 | `--check` | 检查环境、配置、目标冲突和运行包完整性，不写文件 |
+| `--config <文件>` | co-pi TOML 路径，默认 `~/.cpi/config.toml`；首次迁移，重装保留 |
 | `--agent-dir <目录>` | pi 配置目录，默认 `~/.pi/agent`；不自动采用 `PI_CODING_AGENT_DIR` |
 | `--bin-dir <目录>` | 快捷命令目录；Windows 为 npm 全局 prefix，macOS/Linux 为该 prefix 下的 `bin/` |
 | `--plugin-dir <目录>` | 插件目录，默认 `~/.codex/plugins/co-pi` |
@@ -173,39 +166,76 @@ git pull --ff-only && bash scripts/install.sh
 
 完成后重连 MCP、重开 monitor。移动原源码或解压目录不会影响已安装的全局副本。只做本地开发构建时使用 `npm run build`；它不会更新全局安装或快捷命令。
 
+## co-pi 配置
+
+配置路径优先级为 `--config <绝对路径>`、`CPI_CONFIG_FILE`、`~/.cpi/config.toml`。安装器、MCP 服务及 monitor 支持同一规则；安装器会把实际路径写入生成的 MCP 配置和 `cpi-monitor` 快捷命令。配置位于安装目录之外，升级时不覆盖。
+
+```toml
+version = 1
+
+[model]
+provider = "my-provider"
+id = "my-model-id"
+thinking = "high"
+
+[retry]
+enabled = true
+max_retries = 3
+base_delay_ms = 2000
+
+[retry.provider]
+max_retry_delay_ms = 60000
+# max_retries = 0
+# timeout_ms = 120000
+
+[compaction]
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+
+[runtime]
+parallelism = 3
+
+[monitor]
+terminal = "auto"
+```
+
+`provider` 和 `id` 使用 pi 中的精确供应商、模型 ID。`thinking` 接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，实际强度仍受模型能力限制，monitor 显示有效值。模型、认证不可用时报告错误，不静默换模型。
+
+首次迁移会展开当前模型的专属思考强度和压缩参数。此后 co-pi 用 TOML 的值构造 SDK 内存设置，不合并 pi 的 `modelThinkingLevels`、`retry` 或 `compaction`。省略的字段使用 co-pi/锁定 SDK 的默认值，配置拼写或类型错误会报错。
+
+`retry` 控制 SDK agent 层重试，`retry.provider` 控制供应商请求层重试；两者独立。可选 `retry.max_agent_delay_ms` 控制 agent 重试等待上限。次数、毫秒和 token 数必须是非负整数。`parallelism` 为 1–4，可用现有 `--parallelism` 参数临时覆盖。任务超时继续使用 `--task-timeout-ms`。
+
+每批任务开始时读取一次 TOML，整批共用该快照。修改模型、思考、重试、压缩及并发后，下一批生效，无须重连。修改配置路径或其他 MCP 启动参数后需重连。
+
+`monitor.terminal` 只选择执行 `cpi-monitor --open` 时使用的终端，不会自行触发开窗。macOS 可设 `"ghostty"` 或 `"terminal"`；Windows 可设 `"windows-terminal"` 或 `"mintty"`；Linux 可设 `"ghostty"`、`"gnome-terminal"`、`"konsole"`、`"xfce4-terminal"`、`"x-terminal-emulator"`、`"xterm"`。`"auto"` 保持原平台选择。指定终端不可用时报告错误，不改用其他终端。同一状态目录已有 monitor 时仍复用它；退出旧 monitor 后重新 `--open` 才会应用新终端。
+
+macOS 使用 Ghostty：
+
+```toml
+[monitor]
+terminal = "ghostty"
+```
+
+当前只开放上述配置。prompt、自动开窗开关、显示偏好和其他执行策略没有新增自定义入口。
+
 ## 配置 pi
 
-默认目录为系统用户的 `~/.pi/agent/`。Windows 通常是 `C:\Users\<用户名>\.pi\agent\`，macOS/Linux 分别在 `/Users/<用户名>/`、`/home/<用户名>/` 下。
+pi 仍提供认证、自定义供应商、扩展、技能和未迁移的工具设置。默认目录为 `~/.pi/agent/`；可通过安装器和 MCP 的 `--agent-dir` 指定其他目录。
 
 | 文件 | 用途 |
 | --- | --- |
-| `settings.json` | 必填的 `defaultProvider`、`defaultModel`，以及思考强度等设置 |
-| `auth.json` | `/login` 管理的认证；也可按供应商要求使用环境变量 |
+| `settings.json` | 首次迁移的数据来源；运行时继续读取扩展、工具等非迁移设置 |
+| `auth.json` | pi `/login` 管理的认证；也可使用供应商环境变量 |
 | `models.json` | 可选的自定义供应商地址、协议和模型定义 |
 
-worker 模型在 pi 设置中选择，不在任务参数或 Codex 主模型设置中选择。已有配置只合并所需字段，不要用示例覆盖整个文件。
+不要在 co-pi TOML 中填写凭据。项目不会把 Codex 登录状态转换成 pi 认证。供应商配置示例见[技术参考](.agents/skills/co-pi/references/technical-reference.md#自定义供应商或-api-地址)。worker 不合并项目级 `.pi/settings.json`。
 
-安装后，在项目目录运行 `./node_modules/.bin/pi`；已有全局 CLI 时可运行 `pi`。PowerShell 7 对应命令为 `& .\node_modules\.bin\pi.cmd`。
-
-| 操作 | 在 pi 中执行 |
-| --- | --- |
-| 认证 | `/login`，按供应商要求登录或输入 API key |
-| 保存模型 | `/model` 选择模型，按 Ctrl+S 保存启动默认值 |
-| 保存强度 | `/thinking` 选择强度，按 Ctrl+S 保存默认值 |
-| 按模型设置强度 | `/settings` → Default thinking level per model |
-| 确认配置 | 重开 pi，检查模型和强度，再发一个简单请求 |
-
-只切换当前会话模型不能替代保存默认值。项目不会把 Codex 登录状态转换成 pi 认证。可选的全局 CLI 安装命令为 `npm install -g @earendil-works/pi-coding-agent@0.86.1`，worker 仍使用本地锁定的 SDK。
-
-自定义 `--agent-dir` 时，安装器、MCP 和 pi CLI 必须指向同一目录：
+自定义 pi 目录时，pi CLI、安装器和 MCP 的 `--agent-dir` 保持一致：
 
 ```bash
 PI_CODING_AGENT_DIR='/实际/pi/agent' ./node_modules/.bin/pi
 ```
-
-新 worker 启动时加载设置，正在运行的 worker 不会切换模型。请在批次结束后改配置。worker 不合并项目级 `.pi/settings.json`；更改 MCP 参数或环境变量后需重连。
-
-[模型字段、强度优先级和自定义 API 完整示例](.agents/skills/co-pi/references/technical-reference.md#模型配置)见技术参考。上游说明：[pi 设置](https://pi.dev/docs/latest/settings)、[供应商认证](https://pi.dev/docs/latest/providers)。
 
 ## 接入 Codex 与 monitor
 
@@ -228,7 +258,8 @@ tool_timeout_sec = 3900
 | `--agent-dir <目录>` | `~/.pi/agent`，与 pi 配置位置保持一致 |
 | `--state-dir <目录>` | 优先于 `CPI_STATE_DIR`；默认按线程隔离，macOS 使用用户临时目录，其他环境使用 `~/.cpi/state` |
 | `--thread-id <ID>` | 固定主线程，默认读取服务端 `CODEX_THREAD_ID` |
-| `--parallelism <1–4>` | 默认 3，同时运行的 worker 数 |
+| `--config <文件>` | co-pi TOML 路径，优先于 `CPI_CONFIG_FILE` |
+| `--parallelism <1–4>` | 临时覆盖 TOML 的 `runtime.parallelism`，默认 3 |
 | `--task-timeout-ms <毫秒>` | 默认 1800000；合法范围 100–86400000 |
 
 `tool_timeout_sec = 3900` 覆盖默认四任务、并发三的两轮执行。减少并发或提高单任务超时时，也要增加整批工具调用的时间预算。

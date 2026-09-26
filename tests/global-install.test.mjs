@@ -76,7 +76,7 @@ test('真实 --check 展示全局目标且不写文件', async t => {
 
 test('安装流程将 monitor 和 MCP 绑定到全局副本，构建失败不发布', async t => {
   const { root, plan: global } = await fixture(t);
-  const plan = await preflight({ platform: 'linux', global, agentDir: join(root, 'pi'), binDir: join(root, 'bin'), runProbe: () => '10.0.0' });
+  const plan = await preflight({ configPath: join(root, 'config.toml'), platform: 'linux', global, agentDir: join(root, 'pi'), binDir: join(root, 'bin'), runProbe: () => '10.0.0' });
   await assert.rejects(install(plan, { build: () => { throw new Error('build_failed'); } }), /build_failed/);
   assert.deepEqual(await readdir(root), ['source']);
   await install(plan, { build: () => {} });

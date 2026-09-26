@@ -8,16 +8,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMcpServer } from "./mcp.js";
 import { Supervisor } from "./supervisor.js";
 import { resolveStateDirectory } from "./state-directory.js";
+import { resolveConfigPath } from "./config.js";
 import { normalizeThreadId } from "./state-thread.js";
 
 const { values } = parseArgs({ options: {
   "state-dir": { type: "string" }, "agent-dir": { type: "string" },
   "thread-id": { type: "string" },
-  parallelism: { type: "string", default: "3" }, "task-timeout-ms": { type: "string", default: "1800000" },
+  config: { type: "string" },
+  parallelism: { type: "string" }, "task-timeout-ms": { type: "string", default: "1800000" },
   help: { type: "boolean" },
 } });
 if (values.help) {
-  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（未传参数时先读取 CPI_STATE_DIR；macOS 默认使用用户临时目录）\n--thread-id <ID>  绑定的主 agent 线程（默认 CODEX_THREAD_ID）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--parallelism <1–4>  并发 worker 数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
+  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（未传参数时先读取 CPI_STATE_DIR；macOS 默认使用用户临时目录）\n--thread-id <ID>  绑定的主 agent 线程（默认 CODEX_THREAD_ID）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--config <文件>  co-pi TOML 配置（默认 ~/.cpi/config.toml；支持 CPI_CONFIG_FILE）\n--parallelism <1–4>  临时覆盖配置中的并发数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
 } else {
   await main().catch(error => {
     const code = error?.code;
@@ -36,9 +38,10 @@ async function main() {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const supervisor = new Supervisor({
     stateDir,
+    configPath: resolveConfigPath(values.config),
     threadId,
     agentDir: resolve(values["agent-dir"] ?? join(homedir(), ".pi", "agent")),
-    parallelism: Number(values.parallelism), taskTimeoutMs: timeout,
+    parallelism: values.parallelism === undefined ? undefined : Number(values.parallelism), taskTimeoutMs: timeout,
   });
   const server = createMcpServer(supervisor);
   let stopping: Promise<void> | undefined;

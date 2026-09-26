@@ -1,4 +1,5 @@
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
+import { configFromPi, serializeConfig } from "../dist/config.js";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { WINDOWS_SHELL } from '../dist/platform.js';
@@ -34,4 +35,10 @@ export function waitFor(emitter, name, predicate = () => true, timeout = 10_000)
     };
     emitter.on(name, listener);
   });
+}
+
+export function writeTestConfig(agentDir, settings = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8'))) {
+  const path = join(agentDir, 'config.toml');
+  writeFileSync(path, serializeConfig(configFromPi(settings)));
+  return path;
 }
