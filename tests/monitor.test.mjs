@@ -217,7 +217,7 @@ test('主 agent 缓存条固定在快捷键上方，随用量变化且不混用 
   for (const width of [1, 12, 40, 80]) assert.ok(router.render(width).every(line => visibleWidth(line) <= width));
 });
 
-test('缓存来源在窄屏和低高度仍可辨认，重绘只增长记录年龄', t => {
+test('短窗口压缩用量，i 详情仍可读来源和记录时间且不影响阅读位置', t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-09-23T10:35:00Z') });
   const updatedAt = '2026-09-23T10:33:53Z';
   const date = new Date(updatedAt);
@@ -229,21 +229,28 @@ test('缓存来源在窄屏和低高度仍可辨认，重绘只增长记录年�
     for (const detail of [false, true]) {
       if (detail) router.handleInput('\r');
       for (const width of [40, 80, 120]) {
-        const lines = router.render(width);
-        assert.match(lines.at(-3), /监控线程 12345678.*自动匹配/);
-        assert.ok(lines.at(-2).includes(time), lines.at(-2));
-        assert.match(lines.at(-2), /前/);
-        assert.ok(lines.every(line => visibleWidth(line) <= width));
+        const before = router.render(width);
+        if (rows === 8) assert.match(before.at(-2), /主缓存 99\.0%.*线程/);
+        router.handleInput('i');
+        let pages = router.render(width).join('\n');
+        router.handleInput('s'); pages += '\n' + router.render(width).join('\n');
+        assert.match(pages, /监控线程\s+12345678/); assert.match(pages, /自动匹配/);
+        assert.ok(pages.includes(time), pages);
+        assert.match(pages, /前/);
+        assert.ok(router.render(width).every(line => visibleWidth(line) <= width));
+        router.handleInput('i');
+        assert.deepEqual(router.render(width), before);
       }
     }
     t.mock.timers.tick(60_000);
-    assert.ok(router.render(80).at(-2).includes(time));
-    assert.match(router.render(80).at(-2), rows === 8 ? /2m 前/ : /3m 前/);
+    router.handleInput('i');
+    assert.ok(router.render(120).join('\n').includes(time));
+    assert.match(router.render(120).join('\n'), rows === 8 ? /2m 前/ : /3m 前/);
   }
 });
 
 test('无记录、时间缺失与读取失败不伪造更新时间，并保留线程来源', () => {
-  const router = new MonitorRouter(() => 12, () => {}, () => {}, { color: false });
+  const router = new MonitorRouter(() => 24, () => {}, () => {}, { color: false });
   assert.match(router.render(80).at(-3), /监控线程 未找到/);
   assert.match(router.render(80).at(-2), /尚无用量记录/);
   const usage = { state: 'ready', automatic: false, threadId: '12345678-abcd-1234-abcd-123456789abc', inputTokens: 1000, cachedInputTokens: 990 };

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 const marker = '.co-pi-install.json';
 const owner = 'co-pi-global-install-v1';
 const files = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'tsconfig.json',
-  'src', 'dist', 'node_modules', 'scripts', '.agents/skills/co-pi', 'README.md'];
+  'src', 'dist', 'node_modules', 'scripts', '.agents/skills/co-pi', 'README.md', 'DESIGN.md'];
 
 export function globalInstallPlan({ home = homedir(), codexHome = process.env.CODEX_HOME,
   pluginDir, skillsDir, source }) {

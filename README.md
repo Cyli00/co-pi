@@ -40,7 +40,14 @@ Windows PowerShell 7 可在项目目录直接运行统一入口：`pwsh -NoProfi
 ./node_modules/.bin/pi
 ```
 
-在 pi 中用 `/login` 登录供应商，用 `/model` 选择模型并按 Ctrl+S 保存默认值，再用 `/thinking` 选择并保存思考强度。已有可用配置时直接沿用。
+在 pi 中完成以下步骤：
+
+1. `/login`：登录所用供应商。
+2. `/model`：选择模型，**按 Ctrl+S 确认并保存默认模型**。
+3. `/thinking`：选择思考强度，**按 Ctrl+S 确认并保存默认思考强度**。
+4. 退出并重开 pi，确认模型和思考强度仍然正确，再发送一个简单请求验证认证。
+
+仅选择模型或只在当前会话切换不会保存默认值。未保存默认模型时，co-pi 会在创建 worker 前返回 `pi_default_model_required`，不会请求模型服务。已有配置也应先确认保存了默认值；安装成功不代表模型配置已经完成。
 
 ### 3. 接入 Codex，运行第一个任务
 
@@ -219,7 +226,7 @@ tool_timeout_sec = 3900
 | 服务参数，追加到 `args` | 默认值 / 用途 |
 | --- | --- |
 | `--agent-dir <目录>` | `~/.pi/agent`，与 pi 配置位置保持一致 |
-| `--state-dir <目录>` | 有线程 ID 时为 `~/.cpi/state/<线程ID>`，否则为 `~/.cpi/state` |
+| `--state-dir <目录>` | 优先于 `CPI_STATE_DIR`；默认按线程隔离，macOS 使用用户临时目录，其他环境使用 `~/.cpi/state` |
 | `--thread-id <ID>` | 固定主线程，默认读取服务端 `CODEX_THREAD_ID` |
 | `--parallelism <1–4>` | 默认 3，同时运行的 worker 数 |
 | `--task-timeout-ms <毫秒>` | 默认 1800000；合法范围 100–86400000 |
@@ -252,12 +259,22 @@ cpi-monitor --once --state-dir '/实际状态目录'
 | 平台 | 自动开窗方式 |
 | --- | --- |
 | Windows | 优先 Windows Terminal；找不到或无法创建进程时尝试 Git Bash Mintty |
-| macOS | 系统 Terminal；SSH 会话回退手动启动 |
+| macOS | 系统 Terminal；沙盒开窗受限时可经宿主审批重试一次，仍失败或处于 SSH 会话则提醒用户手动启动 |
 | Linux | 需要 `DISPLAY` 或 `WAYLAND_DISPLAY`，尝试 GNOME Terminal、Konsole、Xfce Terminal、`x-terminal-emulator`、xterm |
 
 `--open` 使用当前 Node 与 monitor 的绝对路径，最多等待约 15 秒确认就绪。相同状态目录不重复开窗，也不更改已有窗口的筛选条件。失败退出码为 1，并返回 Bash/zsh 手动命令。它不能与 `--once` 合用。
 
+macOS 沙盒可能在 Terminal.app 存在时仍返回 LaunchServices `-10827`。主 agent 可通过宿主提供的权限审批机制重试同一命令一次，以 monitor 就绪回执确认成功，不修改系统设置或关闭沙盒。没有该机制、审批拒绝或重试仍失败时，停止自动开窗；启动 co-pi 后立即提醒用户在自己的终端运行 `cpi-monitor --state-dir '/实际绝对目录'`，实际命令须填好 MCP 的状态目录。同一目录只提醒一次，不等待 worker 完成，不阻塞委派。工具 PTY 启动成功或 App 终端请求仅返回 `queued`，均不能替代这一提醒。
+
 没有注册快捷命令时，可用 `node /实际安装目录/dist/monitor-cli.js` 加相同参数。退出监控不影响 worker。
+
+monitor 通过状态目录中的文件锁协调单实例与就绪状态，不监听本机 TCP 端口。锁每 2 秒续期，异常退出后约 10 秒过期，可重新启动。更新此版本前请关闭旧 monitor，避免旧版 TCP 检测与新版文件锁同时运行。
+
+macOS 中，未指定状态目录时使用 `<系统用户临时目录>/co-pi-<uid>/state/<线程ID>`，避免启动时写入不可写的主目录。MCP 与沙盒内 monitor 共用这一默认值。其他平台继续使用 `~/.cpi/state/<线程ID>`。`--state-dir` 和 `CPI_STATE_DIR` 指定完整目录，不再追加线程 ID；显式路径不可写时直接报错，不静默换目录。MCP 与 monitor 始终共用 MCP 初始化信息给出的实际绝对路径；临时目录可能被系统清理，需保留历史时应显式指定获准写入的持久目录。安装器也支持 `--state-dir`，用于固定单线程实例。允许读写文件并不代表允许启动桌面应用：`--open` 失败会显示失败阶段、错误码或退出码，并提供手动命令。若 `--open` 在已有 TTY 中开窗失败，会直接在当前 TTY 显示；无 TTY 时返回手动命令，可由主 agent 用宿主提供的 PTY 执行，或追加 `--once`。无须为了读取监控而改成 full-access。
+
+Codex 必须实际注册 MCP，复制插件目录本身不等于接入成功。按安装器输出配置 MCP 后，用 `codex mcp get co-pi` 核对，再重新连接或开启新任务。macOS 桌面应用不一定继承交互 shell 中的供应商环境变量；MCP 的认证应使用 pi 登录或显式传入所需变量，不能通过加载 shell 配置来掩盖问题。
+
+通过受限 shell 临时启动的 MCP 会继承网络沙盒。模型连接失败且 `CODEX_SANDBOX_NETWORK_DISABLED=1` 时返回 `model_network_disabled`；认证、限流、TLS 等错误有独立分类，响应正文不写入监控。优先使用 Codex 正式 MCP 连接，或为有边界的本地验证申请所需权限。插件不改变沙盒或自动提权。
 
 | 参数 | 用途 |
 | --- | --- |
@@ -278,11 +295,18 @@ cpi-monitor --once --state-dir '/实际状态目录'
 | 上一页 / 下一页 | w / s | PgUp / PgDn、u/d、Ctrl+U/D；空格下一页 |
 | 回顶 / 跟随最新 | Home / End | g / f 或 G；部分键盘用 fn+↑/↓ |
 | 进入任务 / 返回列表 | Enter / Esc | b 返回 |
+| 列表：仅活跃 / 全部 | a | 保留选中任务，不自动重排 |
+| 详情：上一个 / 下一个任务 | [ / ] | 保留当前分类和各任务的阅读位置 |
 | 切换全部、阶段、工具、输出、交接 | ← / → | Tab / Shift+Tab；数字键不再切换 |
 | 展开 / 折叠工具和 SDK 思考文本 | t | 默认折叠，分类间共享状态 |
+| 用量与完整标识 / 返回 | i | Esc 返回，支持滚动和翻页 |
 | 帮助 / 退出 | ? / q | Ctrl+C 退出 |
 
 `fn+↑/↓` 的行为取决于终端发送的是 Home/End 还是 PageUp/PageDown。帮助页支持滚动；时间线按事件保留阅读位置，旧事件淘汰不会带走仍缓存的当前内容。
+
+已结束且有交接的任务首次打开时直接进入交接，从结论开头显示；其他分类首次跟随最新事件。切换任务或分类会恢复各自的阅读位置。向上滚动后显示 `○ 浏览`，按 `f` 或 End 恢复跟随；在末尾向下滚动不会意外暂停。矮窗口也保留跟随状态和返回提示。
+
+列表短编号在本次 monitor 运行中保持稳定，同名任务也能区分。窗口空间优先用于任务，全部任务能显示后才展开摘要和详细用量；按 `i` 可在短窗口查看完整用量来源与真实任务标识。失联、失败、受阻和部分完成都有 `!` 标记与状态文字，不依赖颜色。设计与交互约定见 [DESIGN.md](DESIGN.md)。
 
 时间线展示工具调用、Markdown 公开输出和交接证据。仅展示 SDK 提供的非屏蔽思考文本，不读取签名；没有正文时显示提示，不补造旧记录。
 
@@ -290,6 +314,7 @@ cpi-monitor --once --state-dir '/实际状态目录'
 
 - `—` 表示无记录、数据无效、线程不明确或读取失败；真正零命中显示 `0.0%`。
 - 用量更新时间来自日志事件。无有效时间时显示“记录时间未知”，无记录时显示“尚无用量记录”。
+- 事件与用量都按运行 monitor 的本地时区显示；事件包含日期与“本地”标识，详细用量时间包含时区偏移。
 - 线程按状态目录绑定，不按最近活动或项目猜选；旧目录的绑定方法见[技术参考](.agents/skills/co-pi/references/technical-reference.md#监控与线程绑定)。
 - 费用按模型配置估算，零费用也可能表示没有配置价格。压缩后尚无新用量时，上下文占用显示“未知”。
 
@@ -363,12 +388,12 @@ node dist/monitor-cli.js --help
 | MCP 无法启动 | 检查 Node 版本、`command`、JS 绝对路径和构建产物；单独运行 stdio 服务会等待协议输入 |
 | `$co-pi` 未被识别 | 技能目录需含 `SKILL.md` 与 `references/`；确认 MCP 已注册并重启 Codex |
 | `pi_settings_unreadable` | 检查 `--agent-dir` 和合法 JSON，不支持注释或尾随逗号 |
-| `pi_default_model_required` | `/model` 中按 Ctrl+S，保存 `defaultProvider` 和 `defaultModel` |
+| `pi_default_model_required` | 在与 MCP 相同配置目录的 pi 中进入 `/model`，按 **Ctrl+S** 保存默认模型；进入 `/thinking`，按 **Ctrl+S** 保存默认思考强度。重开 pi 核对，再重新委派；不必重装插件 |
 | `pi_configured_model_unavailable` | 核对供应商和模型 ID；自定义定义应在正确目录的 `models.json` 中 |
 | `pi_thinking_invalid` / 强度不生效 | 检查档位、模型专属映射和模型能力；项目级设置不生效，已运行的 worker 不会重载 |
 | `windows_shell_path_required` | 重跑安装器合并正确 `shellPath`，不要覆盖整个配置文件 |
 | `pi_extension_load_failed` / `pi_extension_start_failed` | 在 pi 中排查扩展加载、注册和 `session_start` |
-| `--open` 失败 | 检查桌面环境及终端，使用返回的手动命令；无 TTY 时使用 `--once` |
+| `--open` 失败 | 按输出的阶段、系统错误码或终端退出码定位；文件锁阶段检查状态目录写权限，终端启动阶段检查桌面会话及沙盒限制。使用返回的手动命令，无 TTY 时追加 `--once` |
 
 ### 执行与审批阶段
 
@@ -387,4 +412,4 @@ node dist/monitor-cli.js --help
 - [附录 C：开发与测试](.agents/skills/co-pi/references/maintenance-guide.md#附录-c开发与测试)
 - [技术参考：模型配置、任务契约、审批协议与监控实现](.agents/skills/co-pi/references/technical-reference.md)
 
-Windows 已完成本机安装、运行包和监控开窗验证；macOS/Linux 有平台分支测试，尚未完成各系统桌面实测。本地模拟模型测试覆盖协议和 SDK，真实供应商及主 agent 行为仍需接入后验证。
+Windows 已完成本机安装、运行包和监控开窗验证；macOS 已验证沙盒内 TTY 启动、单实例复用和退出，当前环境的桌面开窗仍受 LaunchServices 限制；Linux 有平台分支测试，尚未完成桌面实测。本地模拟模型测试覆盖协议和 SDK，真实供应商及主 agent 行为仍需接入后验证。

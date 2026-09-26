@@ -2,6 +2,7 @@ import { Markdown, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/
 import { isTerminal, safeText, type Activity, type TaskState } from "./protocol.js";
 
 import { runtimeErrorSummary } from "./runtime-errors.js";
+import { formatMonitorTime } from "./monitor-time.js";
 
 export type FeedFilter = "all" | "stages" | "tools" | "text" | "handoff";
 export const filters: { id: FeedFilter; label: string }[] = [
@@ -86,7 +87,7 @@ export function renderFeedLayout(state: TaskState, width: number, filter: FeedFi
     if (event.kind.startsWith("tool_") && communicationTool(event)) continue;
     if (event.kind === "handoff" && state.handoff) continue;
     const start = lines.length;
-    const time = event.at.slice(11, 19);
+    const time = `${formatMonitorTime(event.at) ?? "时间未知"} 本地`;
     if (event.kind === "thinking_text") {
       const status = event.final === false ? "正在思考" : "思考结束";
       if (expanded) card("stages", `思考 · ${status}  ${time} · t 收起`, style.markdown(event.text || "模型未提供可显示的思考文本。", inner));

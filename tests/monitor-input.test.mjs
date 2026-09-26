@@ -89,3 +89,20 @@ test('真实终端分发：帮助页 PgUp/PgDn 与 w/s 一致', t => {
   assert.equal(press('\x1b[5~'), top);
   assert.equal(press('\x1b[6~'), bottom);
 });
+
+test('真实终端分发：任务切换、活跃筛选和信息页往返', t => {
+  const { router, state, press, render } = monitor(t);
+  state.tasks[0].phase = 'completed';
+  router.update([state]);
+  assert.match(press('a'), /仅活跃/);
+  press('\r'); assert.equal(router.route.taskId, '1');
+  press('\x1b[C'); press('g'); press('j');
+  const first = render();
+  press(']'); assert.equal(router.route.taskId, '2');
+  assert.match(render(), /\[阶段\]/);
+  assert.equal(press('['), first);
+  assert.match(press('i'), /用量与标识/);
+  assert.equal(press('\x1b'), first);
+  press('b'); press('a'); press('\r');
+  assert.equal(router.route.taskId, '1');
+});
