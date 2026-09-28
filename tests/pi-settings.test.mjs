@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { readSnapshots } from '../dist/store.js';
 import { MonitorStyle, renderFeed } from '../dist/monitor-view.js';
 import { readPiSettings } from '../dist/pi-settings.js';
+import { serializeConfig, validateConfig } from '../dist/config.js';
 import { piSetupGuidance } from '../scripts/install.mjs';
 import { writeTestConfig, temporary, task } from './helpers.mjs';
 
@@ -40,6 +41,13 @@ test('缺省模型在 MCP 派发时预检失败，无 worker 启动，交接和�
   const historical = { ...snapshot.tasks[0], events: [{ at: new Date().toISOString(), kind: 'runtime', text: 'pi_default_model_required' }] };
   assert.match(renderFeed(historical, 100, 'stages', false, new MonitorStyle(false)).join('\n'), /\/model/);
   assert.equal(await readFile(join(root, 'settings.json'), 'utf8'), '{}');
+  await writeFile(join(root, 'config.toml'), serializeConfig(validateConfig({ model: { enabled: false } })));
+  const inherited = await client.callTool({ name: 'delegate_batch', arguments: { requestId: 'no-pi-defaults', workspace: root, tasks: [task('one')] } });
+  assert.equal(inherited.isError, true);
+  const inheritedOutput = JSON.parse(inherited.content[0].text);
+  assert.equal(inheritedOutput.tasks[0].error, 'pi_default_model_required');
+  assert.match(inheritedOutput.tasks[0].guidance, /\/model/);
+  assert.ok(!phases.includes('starting') && !phases.includes('running'));
 });
 
 test('模型预检拒绝缺失、非字符串和空白值，只读保留已有配置', async t => {

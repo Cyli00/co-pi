@@ -155,7 +155,7 @@ export class Supervisor extends EventEmitter {
     this.changed(run.snapshot);
     try {
       run.config = await this.loadExecutionConfig();
-      if (!this.options.workerPath) requireModel(run.config!);
+      if (!this.options.workerPath) run.config = await resolveModelConfig(run.config!, this.options.agentDir);
     }
     catch (error) {
       for (const state of run.snapshot.tasks) this.finish(state, run.snapshot, errorCode(error));

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readConfig, resolveConfigPath, validateConfig, serializeConfig } from '../dist/config.js';
+import { readConfig, resolveConfigPath, validateConfig, serializeConfig, resolveModelConfig } from '../dist/config.js';
 import { inheritedSettings } from '../dist/settings.js';
 import { Supervisor } from '../dist/supervisor.js';
 import { terminalCandidates } from '../dist/monitor-open.js';
@@ -20,17 +20,69 @@ test('TOML 支持注释与普通语法，错误不回显原文；路径优先级
   await writeFile(path, `# 保留注释\n[model]\nprovider = 'local'\nid = "test"\nthinking = 'max'\n[runtime]\nparallelism = 2\n[monitor]\nterminal = 'ghostty'\n`);
   const config = await readConfig(path);
   assert.equal(config.model.thinking, 'max');
+  assert.equal(config.model.enabled, true);
   assert.equal(config.runtime.parallelism, 2);
   assert.equal(config.monitor.terminal, 'ghostty');
   assert.equal(config.retry.max_retries, 3);
   for (const value of ['password = "DO_NOT_PRINT"', '[runtime]\nparallelism = 0', '[runtime]\nparallelism = 5',
     '[model]\nthinking = "invalid"', '[retry]\nmax_retries = -1', '[compaction]\nreserve_tokens = 1.5',
-    '[monitor]\nterminal = "shell command"', '[retry]\nenabled = "false"', 'model = "DO_NOT_PRINT', 'version = 2']) {
+    '[monitor]\nterminal = "shell command"', '[retry]\nenabled = "false"', '[model]\nenabled = "off"', 'model = "DO_NOT_PRINT', 'version = 2']) {
     await writeFile(path, value);
     await assert.rejects(readConfig(path), error => error.message === 'cpi_config_invalid');
   }
   await assert.rejects(readConfig(join(root, 'missing')), /cpi_config_missing/);
   assert.equal((await readConfig(join(root, 'missing'), true)).monitor.terminal, 'auto');
+});
+
+test('关闭模型覆盖时沿用 pi 默认值、模型专属思考强度；批次快照不随 pi 修改而变化', async t => {
+  const root = temporary(t), path = join(root, 'settings.json');
+  const original = JSON.stringify({ ...platformSettings, defaultProvider: 'pi-provider', defaultModel: 'pi-model',
+    defaultThinkingLevel: 'low', modelThinkingLevels: { 'pi-provider/pi-model': 'high' },
+    retry: { enabled: false, maxRetries: 99 }, compaction: { enabled: false }, defaultTools: ['read'] });
+  await writeFile(path, original);
+  const config = validateConfig({ model: { enabled: false, provider: 'ignored', id: 'ignored', thinking: 'off' } });
+  const snapshot = await resolveModelConfig(config, root);
+  assert.equal(config.model.enabled, false);
+  assert.equal(snapshot.model.provider, 'pi-provider');
+  assert.equal(snapshot.model.id, 'pi-model');
+  assert.equal(snapshot.model.thinking, 'high');
+  const manager = await inheritedSettings(root, config);
+  assert.equal(manager.getDefaultProvider(), 'pi-provider');
+  assert.equal(manager.getDefaultModel(), 'pi-model');
+  assert.equal(manager.getDefaultThinkingLevel(), 'high');
+  assert.deepEqual(manager.getAllModelThinkingLevels(), {});
+  assert.equal(manager.getRetrySettings().maxRetries, 3);
+  assert.equal(manager.getCompactionSettings().enabled, true);
+  assert.deepEqual(manager.getDefaultTools(), ['read']);
+  manager.setDefaultModel('memory-only');
+  await manager.flush();
+  assert.equal(await readFile(path, 'utf8'), original);
+  await writeFile(path, JSON.stringify({ ...platformSettings, defaultProvider: 'new-provider', defaultModel: 'new-model', defaultThinkingLevel: 'low' }));
+  assert.equal((await inheritedSettings(root, snapshot)).getDefaultModel(), 'pi-model');
+  assert.equal((await inheritedSettings(root, snapshot)).getDefaultThinkingLevel(), 'high');
+  const next = await resolveModelConfig(config, root);
+  assert.equal(next.model.id, 'new-model');
+  assert.equal(next.model.thinking, 'low');
+  assert.equal((await resolveModelConfig(validateConfig({ model: { enabled: false } }), root)).model.id, 'new-model');
+  const configPath = join(root, 'config.toml');
+  await writeFile(configPath, serializeConfig(config));
+  assert.equal((await readConfig(configPath)).model.enabled, false);
+});
+
+test('继承模式拒绝缺失默认模型或无效思考强度；显式模型仍可独立使用', async t => {
+  const root = temporary(t), path = join(root, 'settings.json');
+  const config = validateConfig({ model: { enabled: false } });
+  await assert.rejects(resolveModelConfig(config, root), /pi_settings_unreadable/);
+  await writeFile(path, '{}');
+  await assert.rejects(resolveModelConfig(config, root), /pi_default_model_required/);
+  await writeFile(path, JSON.stringify({ defaultProvider: 'pi', defaultModel: 'model', defaultThinkingLevel: 'invalid' }));
+  await assert.rejects(resolveModelConfig(config, root), /pi_thinking_invalid/);
+  await writeFile(path, JSON.stringify({ defaultProvider: 'pi', defaultModel: 'model', defaultThinkingLevel: 'high', modelThinkingLevels: { 'pi/model': 'invalid' } }));
+  await assert.rejects(resolveModelConfig(config, root), /pi_thinking_invalid/);
+  await writeFile(path, JSON.stringify({ defaultProvider: 'pi', defaultModel: 'model' }));
+  assert.equal((await resolveModelConfig(config, root)).model.thinking, 'medium');
+  const explicit = validateConfig({ model: { provider: 'local', id: 'test', thinking: 'off' } });
+  assert.equal(await resolveModelConfig(explicit, join(root, 'missing')), explicit);
 });
 
 test('安装只迁移白名单及当前模型有效值，升级逐字保留用户配置', async t => {
@@ -51,6 +103,7 @@ test('安装只迁移白名单及当前模型有效值，升级逐字保留用�
   assert.equal(config.retry.provider.max_retries, 0);
   assert.equal(config.compaction.reserve_tokens, 8000);
   assert.equal(config.compaction.keep_recent_tokens, 2000);
+  await writeFile(join(root, 'settings.json'), JSON.stringify(platformSettings));
   const manager = await inheritedSettings(root, config);
   assert.equal(manager.getRetrySettings().baseDelayMs, 13);
   assert.equal(manager.getProviderRetrySettings().timeoutMs, 123);

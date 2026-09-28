@@ -5,6 +5,7 @@ import { parse, stringify } from "smol-toml";
 import { z } from "zod";
 import { CpiError } from "./protocol.js";
 import { DEFAULT_PARALLELISM, MAX_PARALLELISM } from "./limits.js";
+import { readPiSettings } from "./pi-settings.js";
 
 const integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const thinking = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -14,6 +15,7 @@ export type MonitorTerminal = z.infer<typeof terminalSchema>;
 export const configSchema = z.object({
   version: z.literal(1).default(1),
   model: z.object({
+    enabled: z.boolean().default(true),
     provider: z.string().trim().default(""),
     id: z.string().trim().default(""),
     thinking: thinking.default("medium"),
@@ -68,6 +70,21 @@ export function requireModel(config: CpiConfig): void {
   if (!config.model.provider || !config.model.id) throw new CpiError("cpi_model_required");
 }
 
+export async function resolveModelConfig(config: CpiConfig, agentDir: string): Promise<CpiConfig> {
+  if (config.model.enabled) {
+    requireModel(config);
+    return config;
+  }
+  const settings = await readPiSettings(agentDir);
+  const provider = (settings.defaultProvider as string).trim();
+  const id = (settings.defaultModel as string).trim();
+  const levels = settings.modelThinkingLevels as Record<string, unknown> | undefined;
+  const level = thinking.safeParse(levels?.[`${provider}/${id}`] ?? settings.defaultThinkingLevel ?? "medium");
+  if (!level.success) throw new CpiError("pi_thinking_invalid");
+  // 将 pi 默认值固定到批次快照，worker 不再解析开关或重读模型设置。
+  return { ...config, model: { enabled: true, provider, id, thinking: level.data } };
+}
+
 export function configFromPi(settings: Record<string, any>): CpiConfig {
   const key = `${settings.defaultProvider}/${settings.defaultModel}`;
   const retry = settings.retry ?? {};
@@ -95,7 +112,8 @@ export function configFromPi(settings: Record<string, any>): CpiConfig {
 
 export function serializeConfig(config: CpiConfig): string {
   return "# co-pi 配置。首次安装从 pi 迁移，重装不覆盖。\n"
-    + "# 模型、思考强度、重试和压缩由此文件决定；认证及供应商定义仍由 pi 管理。\n"
+    + "# model.enabled = false 时沿用 pi 默认模型及思考强度；省略或 true 时使用此处的模型设置。\n"
+    + "# 重试和压缩由此文件决定；认证及供应商定义仍由 pi 管理。\n"
     + "# 新批次读取最新配置；运行中的批次保持原设置。\n"
     + "# monitor.terminal：auto 或平台终端名。macOS 支持 terminal、ghostty。\n\n"
     + stringify(JSON.parse(JSON.stringify(validateConfig(config)))) + "\n";
