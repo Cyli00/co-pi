@@ -174,6 +174,7 @@ git pull --ff-only && bash scripts/install.sh
 version = 1
 
 [model]
+enabled = true
 provider = "my-provider"
 id = "my-model-id"
 thinking = "high"
@@ -200,13 +201,22 @@ parallelism = 3
 terminal = "auto"
 ```
 
-`provider` 和 `id` 使用 pi 中的精确供应商、模型 ID。`thinking` 接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，实际强度仍受模型能力限制，monitor 显示有效值。模型、认证不可用时报告错误，不静默换模型。
+`model.enabled` 默认为 `true`，省略时保持现有行为。`provider` 和 `id` 使用 pi 中的精确供应商、模型 ID。`thinking` 接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，实际强度仍受模型能力限制，monitor 显示有效值。模型、认证不可用时报告错误，不静默换模型。
 
-首次迁移会展开当前模型的专属思考强度和压缩参数。此后 co-pi 用 TOML 的值构造 SDK 内存设置，不合并 pi 的 `modelThinkingLevels`、`retry` 或 `compaction`。省略的字段使用 co-pi/锁定 SDK 的默认值，配置拼写或类型错误会报错。
+关闭 co-pi 的模型覆盖，沿用 pi 默认配置：
+
+```toml
+[model]
+enabled = false
+```
+
+此时可省略 `provider`、`id`、`thinking`；已有值不参与模型选择。每批开始时从 `--agent-dir` 对应的 pi `settings.json` 读取默认供应商、模型及思考强度，模型专属思考强度优先于全局默认值。整批共用解析后的快照，修改 pi 默认值在下一批生效，无须重连。pi 未保存默认模型时派发失败，并提示保存默认值。`enabled` 使用 TOML 布尔值 `true` / `false`，关闭模型覆盖与 `thinking = "off"` 含义不同。
+
+首次迁移会展开当前模型的专属思考强度和压缩参数。此后 co-pi 用批次快照构造 SDK 内存设置。`model.enabled = false` 只改变模型和思考强度的来源；`retry` 和 `compaction` 始终使用 TOML 配置，不合并 pi 中的对应设置。省略的字段使用 co-pi/锁定 SDK 的默认值，配置拼写或类型错误会报错。
 
 `retry` 控制 SDK agent 层重试，`retry.provider` 控制供应商请求层重试；两者独立。可选 `retry.max_agent_delay_ms` 控制 agent 重试等待上限。次数、毫秒和 token 数必须是非负整数。`parallelism` 为 1–4，可用现有 `--parallelism` 参数临时覆盖。任务超时继续使用 `--task-timeout-ms`。
 
-主 agent 在规划每个新批次前调用只读 `get_capabilities`，获取当前有效 `parallelism`、来源 `parallelism_source` 和单批上限 `max_batch_size`。并发数控制同时运行的 worker，单批上限仍为 4，多出的任务排队。例如并发为 2 时可以提交 4 项独立任务，最多同时执行 2 项。查询不启动 worker、不调用模型、不打开 monitor，也不预留执行名额。
+主 agent 在规划每个新批次前调用 `get_capabilities`，获取当前有效 `parallelism`、来源 `parallelism_source` 和单批上限 `max_batch_size`，以及当前线程的 `state_dir`、`thread_id`、`session_id` 和 `config_path`。并发数控制同时运行的 worker，单批上限仍为 4，多出的任务排队。例如并发为 2 时可以提交 4 项独立任务，最多同时执行 2 项。首次查询会建立线程的状态目录和绑定；不启动 worker、不调用模型、不打开 monitor，也不预留执行名额。
 
 每批任务开始时读取一次 TOML，整批共用该快照。修改模型、思考、重试、压缩及并发后，下一批生效，无须重连。修改配置路径或其他 MCP 启动参数后需重连。
 
@@ -227,7 +237,7 @@ pi 仍提供认证、自定义供应商、扩展、技能和未迁移的工具�
 
 | 文件 | 用途 |
 | --- | --- |
-| `settings.json` | 首次迁移的数据来源；运行时继续读取扩展、工具等非迁移设置 |
+| `settings.json` | 首次迁移的数据来源；运行时读取扩展、工具等设置，`model.enabled = false` 时也读取默认模型及思考强度 |
 | `auth.json` | pi `/login` 管理的认证；也可使用供应商环境变量 |
 | `models.json` | 可选的自定义供应商地址、协议和模型定义 |
 
@@ -276,7 +286,7 @@ tool_timeout_sec = 3900
 
 主 agent 首次向某个状态目录派发任务前，会按[技能规则](.agents/skills/co-pi/SKILL.md)自动开窗。用户选择不打开时跳过；关闭后不反复重开。开窗失败时展示原因和手动命令，继续任务。
 
-下面的目录必须替换成 MCP 初始化说明给出的实际绝对路径：
+下面的目录必须替换成当前线程调用 `get_capabilities` 返回的 `state_dir`，并将返回的 `config_path` 作为 `--config` 参数传入：
 
 ```bash
 # 自动打开可见终端
@@ -303,7 +313,15 @@ macOS 沙盒可能在 Terminal.app 存在时仍返回 LaunchServices `-10827`。
 
 monitor 通过状态目录中的文件锁协调单实例与就绪状态，不监听本机 TCP 端口。锁每 2 秒续期，异常退出后约 10 秒过期，可重新启动。更新此版本前请关闭旧 monitor，避免旧版 TCP 检测与新版文件锁同时运行。
 
-macOS 中，未指定状态目录时使用 `<系统用户临时目录>/co-pi-<uid>/state/<线程ID>`，避免启动时写入不可写的主目录。MCP 与沙盒内 monitor 共用这一默认值。其他平台继续使用 `~/.cpi/state/<线程ID>`。`--state-dir` 和 `CPI_STATE_DIR` 指定完整目录，不再追加线程 ID；显式路径不可写时直接报错，不静默换目录。MCP 与 monitor 始终共用 MCP 初始化信息给出的实际绝对路径；临时目录可能被系统清理，需保留历史时应显式指定获准写入的持久目录。安装器也支持 `--state-dir`，用于固定单线程实例。允许读写文件并不代表允许启动桌面应用：`--open` 失败会显示失败阶段、错误码或退出码，并提供手动命令。若 `--open` 在已有 TTY 中开窗失败，会直接在当前 TTY 显示；无 TTY 时返回手动命令，可由主 agent 用宿主提供的 PTY 执行，或追加 `--once`。无须为了读取监控而改成 full-access。
+macOS 中，未指定状态目录时使用 `<系统用户临时目录>/co-pi-<uid>/state/<线程ID>`，避免启动时写入不可写的主目录。MCP 与沙盒内 monitor 共用这一默认值。其他平台使用 `~/.cpi/state/<线程ID>`。线程身份来自每次 MCP 调用的 `_meta.threadId`；启动时设置 `--thread-id` 或 `CODEX_THREAD_ID` 则固定为该线程，冲突调用会被拒绝。未提供线程身份时不再回退到公共状态目录。
+
+每个 Codex 线程拥有独立状态目录，目录内按 MCP 运行实例的 `session_id` 保存批次。同一线程重载 MCP 后仍可查看自己的历史；不同线程即使使用相同批次 ID，也不会共享任务、消息或交接。线程目录和实例子目录均记录绑定，monitor 只读取绑定一致的实例。
+
+启动 monitor 时，以当前线程的 `get_capabilities` 响应中的 `state_dir` 和 `config_path` 为准。手动终端没有 `CODEX_THREAD_ID` 时必须传入实际 `--state-dir` 或 `--thread-id`，不能直接汇总 `~/.cpi/state`。旧版未绑定的任务保留原样，不自动归属当前线程；需要查看时明确使用 `cpi-monitor --state-dir <旧目录> --session <旧MCP实例ID>`。
+
+`--state-dir` 和 `CPI_STATE_DIR` 仍指定单个线程的完整目录，不追加线程 ID，其他线程使用同一目录会报 `state_thread_conflict`。共享 MCP 配置通常应省略这两项，使用默认的按线程隔离路径；安装器的 `--state-dir` 仅用于固定单线程实例。显式路径不可写时直接报错，不静默换目录。macOS 临时目录可能被系统清理，需保留历史时可为单个线程指定获准写入的持久目录。
+
+允许读写文件并不代表允许启动桌面应用：`--open` 失败会显示失败阶段、错误码或退出码，并提供手动命令。若 `--open` 在已有 TTY 中开窗失败，会直接在当前 TTY 显示；无 TTY 时返回手动命令，可由主 agent 用宿主提供的 PTY 执行，或追加 `--once`。无须为了读取监控而改成 full-access。
 
 Codex 必须实际注册 MCP，复制插件目录本身不等于接入成功。按安装器输出配置 MCP 后，用 `codex mcp get co-pi` 核对，再重新连接或开启新任务。macOS 桌面应用不一定继承交互 shell 中的供应商环境变量；MCP 的认证应使用 pi 登录或显式传入所需变量，不能通过加载 shell 配置来掩盖问题。
 
@@ -317,7 +335,10 @@ Codex 必须实际注册 MCP，复制插件目录本身不等于接入成功。�
 | `--codex-thread <ID>` | `--thread-id` 的兼容别名 |
 | `--codex-home <目录>` | Codex 数据根目录，默认 `CODEX_HOME` 或 `~/.codex`，不是其 `sessions` 子目录 |
 | `--workspace <目录>` | 兼容旧参数，不再按工作区猜测线程 |
-| `--no-color` / `NO_COLOR` | 关闭颜色 |
+| `--color` | 强制启用原有六色主题，覆盖 `NO_COLOR` |
+| `--no-color` / `NO_COLOR` | `--no-color` 显式关闭颜色；非空 `NO_COLOR` 影响当前终端的默认交互模式 |
+
+`--open` 打开的独立 monitor 默认使用彩色，不继承 Codex 命令环境注入的 `NO_COLOR`。需要单色窗口时使用 `--open --no-color`。`--once` 默认输出纯文本，可加 `--color` 输出 ANSI；`--color` 与 `--no-color` 不能合用。已经打开的 monitor 保留启动时的配色，更新后先按 `q` 退出旧窗口，再重新打开。
 | `--help` | 显示帮助 |
 
 ### 快捷键与用量
@@ -334,6 +355,9 @@ Codex 必须实际注册 MCP，复制插件目录本身不等于接入成功。�
 | 展开 / 折叠工具和 SDK 思考文本 | t | 默认折叠，分类间共享状态 |
 | 用量与完整标识 / 返回 | i | Esc 返回，支持滚动和翻页 |
 | 帮助 / 退出 | ? / q | Ctrl+C 退出 |
+| 终止所选任务 | x，然后 y 确认 | Esc / n 取消确认；列表和详情均可使用 |
+
+用户确认终止后，monitor 通过当前线程、MCP 实例、批次和任务的完整身份向 co-pi 发送本地文件请求。排队任务不会启动，运行中任务会被取消；其他任务继续运行，已有文件改动保留。服务确认后，界面显示 `terminated by user`，主 agent 收到的 MCP 结果为 `status: "cancelled"`、`error: "terminated_by_user"`、`guidance: "terminated by user"`。主 agent 不应自动重新委派或接管用户终止的任务。`q` 只关闭 monitor；`--once` 和未绑定的历史目录不提供终止操作。旧版服务需更新并重载后才能接收终止请求。
 
 `fn+↑/↓` 的行为取决于终端发送的是 Home/End 还是 PageUp/PageDown。帮助页支持滚动；时间线按事件保留阅读位置，旧事件淘汰不会带走仍缓存的当前内容。
 
@@ -348,7 +372,7 @@ Codex 必须实际注册 MCP，复制插件目录本身不等于接入成功。�
 - `—` 表示无记录、数据无效、线程不明确或读取失败；真正零命中显示 `0.0%`。
 - 用量更新时间来自日志事件。无有效时间时显示“记录时间未知”，无记录时显示“尚无用量记录”。
 - 事件与用量都按运行 monitor 的本地时区显示；事件包含日期与“本地”标识，详细用量时间包含时区偏移。
-- 线程按状态目录绑定，不按最近活动或项目猜选；旧目录的绑定方法见[技术参考](.agents/skills/co-pi/references/technical-reference.md#监控与线程绑定)。
+- 线程按状态目录绑定，不按最近活动或项目猜选；旧版未绑定任务的查看方式见[技术参考](.agents/skills/co-pi/references/technical-reference.md#监控与线程绑定)。
 - 费用按模型配置估算，零费用也可能表示没有配置价格。压缩后尚无新用量时，上下文占用显示“未知”。
 
 ## 任务、通信与权限
@@ -388,7 +412,7 @@ sandbox_mode = "workspace-write"
 
 安装器不修改这些设置。其他宿主需核对版本和组织策略。普通 MCP 表单的 accept 不能代替自动审批凭据。[路径策略、MCP 元数据和响应校验](.agents/skills/co-pi/references/technical-reference.md#工作区权限与-codex-自动审批)完整保留在技术参考。
 
-monitor 不调用模型、不读取认证配置、不向 worker 发指令。快照不保存任务指令或主任务上下文，但会保存有界的执行事件、SDK 思考文本和完整交接。脱敏不能识别所有秘密，状态目录应按用户私有数据管理。
+monitor 不调用模型、不读取认证配置。用户确认后仅发送所选任务的终止请求，不能向 worker 注入任务指令或执行任意命令。快照不保存任务指令或主任务上下文，但会保存有界的执行事件、SDK 思考文本和完整交接。脱敏不能识别所有秘密，状态目录应按用户私有数据管理。
 
 ## 排障指南
 
@@ -437,7 +461,7 @@ node dist/monitor-cli.js --help
 | `model_request_failed` | 在同一 pi 配置下检查认证、环境变量、服务和协议；MCP 不回传供应商原始错误正文 |
 | `pi_extension_runtime_failed` / `pi_reserved_tool_conflict` | 排查扩展运行错误，以及是否覆盖内置工具或两项通信保留名 |
 | monitor 没有任务 | 核对实际 `--state-dir` 和 `--session`；未委派时“等待第一项委派”正常 |
-| cache-hit 为 `—` / `state_thread_conflict` | 核对固定线程与日志目录；旧目录按明确 ID 绑定，不猜最新线程。无用量记录不影响 worker |
+| cache-hit 为 `—` / `state_thread_conflict` | 核对固定线程与日志目录；共享服务不要固定其他线程的状态目录。旧任务用明确的 `--session` 查看，不猜线程。无用量记录不影响 worker |
 
 ## 附录
 

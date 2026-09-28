@@ -17,7 +17,7 @@
 
 worker 使用 `~/.cpi/config.toml` 的 `[model]`、`[retry]` 和 `[compaction]`。完整示例及终端、并发选项见 [co-pi 配置](../../../../README.md#co-pi-配置)。
 
-首次安装从 pi settings.json 迁移白名单字段，展开当前模型的专属思考强度和压缩参数；已有 TOML 不覆盖。之后修改 pi 默认模型、强度、重试或压缩不会改变 co-pi。
+首次安装从 pi settings.json 迁移白名单字段，展开当前模型的专属思考强度和压缩参数；已有 TOML 不覆盖。`model.enabled` 省略或为 `true` 时使用 TOML 的模型设置；设为 `false` 时，逐批读取 pi 默认供应商、模型及思考强度，模型专属强度优先于全局默认强度。重试和压缩始终由 TOML 控制。
 
 每个批次读取配置快照并传给所有 worker，再构造 SDK 内存设置。`model.thinking` 接受 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，按模型能力调整，monitor 显示有效强度。
 
@@ -75,7 +75,7 @@ args = ["E:/gitProjects/codex-subagents/dist/cli.js", "--agent-dir", "E:/pi-conf
 
 此时会读取 `E:/pi-config/agent/settings.json`、`auth.json` 和 `models.json`。给 pi CLI 配置这套目录时，在 Git Bash 使用 `PI_CODING_AGENT_DIR='E:/pi-config/agent' ./node_modules/.bin/pi`。
 
-每个批次重新读取 co-pi TOML，worker 启动时另行加载 pi 资源设置。
+每个批次重新读取 co-pi TOML；`model.enabled = false` 时还会解析 pi 默认模型及强度并固定到批次快照。worker 启动时另行加载 pi 资源设置。
 
 已运行的 worker 不会中途切换模型。批内使用同一份 TOML 快照，配置修改在下一批生效。修改 MCP 启动参数或环境变量后，需要重新连接 MCP / 重启 Codex。worker 不合并目标项目的 `.pi/settings.json`，所以修改项目级模型设置不会改变这些默认值。
 
@@ -182,7 +182,7 @@ worker 使用 `report_progress` 上报公开进展，使用 `submit_handoff` 提
 
 终态快照落盘后才返回交接，不再周期性重写历史批次。Windows 短暂文件占用会有限退避重试，持续失败仍返回 `state_write_failed`。常规 handoff 建议控制在约 4,000 字符，保留必要证据和未解决项。
 
-初始化说明的动态路径放在固定说明末尾。这些措施减少上下文增量与重复通知。任务详情中的缓存用量属于 pi worker。
+线程相关的实际路径由 `get_capabilities` 返回，共享服务的初始化说明只解释解析规则。这些措施减少上下文增量与重复通知。任务详情中的缓存用量属于 pi worker。
 
 底部的主 agent cache-hit 独立读取 Codex 线程用量，两者不混算。
 
@@ -194,7 +194,7 @@ worker 使用 `report_progress` 上报公开进展，使用 `submit_handoff` 提
 
 执行时遵循以下约定：
 
-- pi `settings.json` 加载为内存副本后，用 co-pi TOML 完整替换模型、强度、retry 和 compaction，清除 pi 的模型专属覆盖。skills、extensions 等继续交给 pi 资源加载器处理。模型缺失时直接失败，不切换供应商。
+- pi `settings.json` 加载为内存副本后，用批次快照替换模型、强度、retry 和 compaction，清除 pi 的模型专属覆盖。`model.enabled = false` 时，模型和有效思考强度已在批次开始时从 pi 默认值解析；其余配置取自 TOML。skills、extensions 等继续交给 pi 资源加载器处理。模型缺失时直接失败，不切换供应商。
 - worker 不回写全局设置。会话使用内存存储，不持久化完整模型会话；监控快照会保留有界、脱敏后的 SDK 思考文本供展开查看。认证刷新和模型缓存仍遵循 pi SDK 的行为，模型目录缓存使用标准 `~/.pi/agent/models-store.json`（`--agent-dir` 会一并改变目录）。
 - 初始化先通过 `createAgentSessionServices` 加载资源并注册扩展供应商，再解析指定模型；通过 `bindExtensions` 以无交互界面的模式执行 `session_start`。扩展加载、启动或运行失败会报告固定错误码，不输出原始异常内容。需要交互确认或自定义 TUI 的扩展不能依赖 monitor 提供界面。
 - 编码模式继承 pi 的 `defaultTools` 和扩展工具，同时保留 `report_progress`、`submit_handoff`。未配置 `defaultTools` 时使用 pi 默认内置工具。扩展不得覆盖内置工具与通信保留名。
@@ -320,7 +320,7 @@ sandbox_mode = "workspace-write"
 
 需要强隔离时，在容器或受限用户环境中运行本服务。
 
-monitor 只读任务状态文件和 Codex 本地线程记录，不连接认证配置、不调用模型、不向 worker 输入指令。每个任务保留最近 200 条有界执行事件，旧事件计数明确显示。
+monitor 读取任务状态文件和 Codex 本地线程记录，不连接认证配置、不调用模型、不向 worker 输入任务指令。用户按 x 并以 y 确认后，可通过当前实例的本地控制目录请求终止所选任务；服务按线程、实例、批次和任务核对身份。结果以 `cancelled` / `terminated_by_user` 返回，并明确报告 `terminated by user`，主 agent 不自动重新委派或接管。每个任务保留最近 200 条有界执行事件，旧事件计数明确显示。
 
 完整 handoff 单独保留在快照内。状态文本去除终端控制字符并对常见令牌形式脱敏，但无法识别任意格式的秘密，因此状态目录仍应视为用户私有数据。任务指令与主任务上下文不写入快照，供应商原始错误正文不进入 MCP 或日志。
 
@@ -338,9 +338,9 @@ thinking 事件保存 SDK 返回的非屏蔽文本累计快照，按 `t` 展开�
 
 ## 监控与线程绑定
 
-同一状态目录的并发开窗请求会合并，已有交互监控时不再开窗，也不修改已有窗口的筛选条件。实例协调仅通过本机 `127.0.0.1` 连接传递身份和就绪状态，不传任务内容。
+同一线程状态目录的并发开窗请求会合并，已有交互监控时不再开窗，也不修改已有窗口的筛选条件。不同线程使用不同目录及文件锁，不会复用其他线程的窗口。
 
-进程退出即释放占用，不向任务状态目录写锁文件。启动脚本位于系统临时目录，确认就绪或失败后清理。
+实例协调使用状态目录内的文件锁和就绪记录。进程退出会释放占用，异常退出的锁约 10 秒后过期。启动脚本位于系统临时目录，确认就绪或失败后清理。
 
 快捷键上方显示 主 agent cache-hit：进度条、最近一次请求的缓存命中率，以及宽窗口下的缓存 / 输入 token 数。其下独立显示“监控线程”和“用量更新”：宽窗口显示固定线程完整 ID、本地日期时间、UTC 时区偏移和记录距今多久。
 
@@ -356,15 +356,17 @@ thinking 事件保存 SDK 返回的非屏蔽文本累计快照，按 `t` 展开�
 
 没有新记录时保留原时间。无效时间显示“记录时间未知”，没有用量记录显示“尚无用量记录”。
 
-状态目录绑定固定线程，不按最新活动或项目自动选线程。 服务端把身份存入 `<state-dir>/codex-thread.json`，相同目录可由同线程重用。
+服务端从每次 MCP 工具调用的 `_meta.threadId` 解析线程；启动参数 `--thread-id` 或进程环境 `CODEX_THREAD_ID` 可固定线程。调用身份与固定线程冲突时拒绝请求。没有身份时返回 `codex_thread_id_required`，不会写入公共根目录。
+
+共享 MCP 进程为不同线程创建独立 Supervisor，分别管理批次、worker、消息和交接。默认状态根目录下按线程 ID 分目录，内部再按 MCP `sessionId` 分目录。线程目录和每个实例目录都保存 `codex-thread.json`；同一 Codex 线程重载服务后可继续查看自己的历史快照。
+
+`get_capabilities` 返回 `state_dir`、`thread_id`、`session_id` 和 `config_path`。monitor 使用返回的实际目录，不从共享服务初始化信息推测目录，也不按最新活动或项目自动选线程。
 
 另一个线程尝试绑定会报 `state_thread_conflict`，不会覆盖旧绑定。monitor 从目录读取绑定，优先于所在终端的 `CODEX_THREAD_ID`。
 
 显式 `--thread-id` 与绑定不一致也会拒绝。`--session` 只过滤 MCP 会话，与 Codex 线程 ID 不同。
 
-旧目录没有绑定时，可由服务端以 `--state-dir <旧目录> --thread-id <正确ID>` 重启建立绑定。monitor 也支持显式 ID（其次是自身 `CODEX_THREAD_ID`）临时查看未绑定目录，但保持只读，不写绑定文件。三者都没有时只显示任务，缓存比例为 `—`，不会猜线程。新主线程应使用自己的状态目录。
-
-不要把旧目录重新绑定给它。
+monitor 不聚合未绑定目录。旧版任务未记录可信线程身份，升级不会自动搬迁或归属它们；可用 `--state-dir <旧目录> --session <旧MCP实例ID>` 明确查看一个旧实例。绑定线程的监控会跳过未绑定或绑定其他线程的实例，即使这些实例被放在同一目录中。新主线程使用自己的状态目录。
 
 ```bash
 # 服务端：绑定固定线程；配置 MCP 启动参数时采用相同参数
