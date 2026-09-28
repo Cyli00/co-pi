@@ -47,7 +47,7 @@ function category(event: Activity): FeedFilter {
   return "stages";
 }
 const stageLabels: Record<string, string> = {
-  thinking: "思考", progress: "进展", compaction: "上下文压缩", retry: "重试", runtime: "运行状态", diagnostic: "提示", message: "消息",
+  thinking: "思考", progress: "进展", compaction: "上下文压缩", retry: "重试", runtime: "运行状态", diagnostic: "提示", message: "消息", termination: "用户终止",
 };
 
 export interface FeedAnchor { key: string; row: number }

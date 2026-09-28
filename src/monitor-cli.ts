@@ -12,41 +12,48 @@ import { fileURLToPath } from "node:url";
 import { openMonitor, quoteShell, describeMonitorError } from "./monitor-open.js";
 import { readConfig, resolveConfigPath } from "./config.js";
 import { acquireMonitorInstance, canonicalStateDirectory, findMonitorInstance } from "./monitor-instance.js";
+import { resolveMonitorColor } from "./monitor-color.js";
+import { requestTaskTermination } from "./monitor-control.js";
 
 const { values } = parseArgs({ options: {
   config: { type: "string" },
   "state-dir": { type: "string" }, session: { type: "string" },
   "thread-id": { type: "string" }, "codex-thread": { type: "string" }, "codex-home": { type: "string" }, workspace: { type: "string" },
-  once: { type: "boolean" }, help: { type: "boolean" }, "no-color": { type: "boolean" },
+  once: { type: "boolean" }, help: { type: "boolean" }, color: { type: "boolean" }, "no-color": { type: "boolean" },
   open: { type: "boolean" }, "open-token": { type: "string" },
 } });
 if (values.help) {
-  console.log("cpi-monitor：基于 pi-tui 的跨平台只读监控\n--state-dir <目录>  与 MCP 共用、绑定固定线程的状态目录\n--config <文件>  读取终端偏好，默认 ~/.cpi/config.toml\n--open  在配置的终端打开监控，同一状态目录不重复启动；不能与 --once 合用\n--session <ID>  只显示指定 MCP 会话\n--thread-id <ID>  固定主 agent 线程，必须与目录绑定一致（兼容 --codex-thread）\n--workspace <目录>  兼容旧参数，不再用项目猜测线程\n--codex-home <目录>  Codex 数据目录（默认 CODEX_HOME 或 ~/.codex）\n--once  打印一次任务列表，无需交互终端\n--no-color  关闭颜色，也支持 NO_COLOR\n缓存用量首次立即查询，此后每 10 秒刷新。\n交互：" + DETAIL_SHORTCUTS + " · q 退出");
+  console.log("cpi-monitor：基于 pi-tui 的跨平台任务监控\n--state-dir <目录>  与 MCP 共用、绑定固定线程的状态目录\n--config <文件>  读取终端偏好，默认 ~/.cpi/config.toml\n--open  在配置的终端打开监控，同一状态目录不重复启动；不能与 --once 合用\n--session <ID>  只显示指定 MCP 会话\n--thread-id <ID>  固定主 agent 线程，必须与目录绑定一致（兼容 --codex-thread）\n--workspace <目录>  兼容旧参数，不再用项目猜测线程\n--codex-home <目录>  Codex 数据目录（默认 CODEX_HOME 或 ~/.codex）\n--once  打印一次任务列表，无需交互终端\n--color  强制彩色，覆盖 NO_COLOR；--open 默认彩色\n--no-color  显式关闭颜色；当前终端交互模式默认遵循非空 NO_COLOR\n缓存用量首次立即查询，此后每 10 秒刷新。\n交互：" + DETAIL_SHORTCUTS + " · x 终止任务（y 确认） · q 退出");
 } else {
   await main().catch(error => {
-    console.error(error instanceof Error ? error.message : "monitor_start_failed");
+    console.error(error instanceof Error && error.message === "codex_thread_id_required"
+      ? "codex_thread_id_required：请指定 get_capabilities 返回的 --state-dir，或用 --thread-id 选择当前 Codex 线程；不会汇总公共目录。"
+      : error instanceof Error ? error.message : "monitor_start_failed");
     process.exitCode = 1;
   });
 }
 
 async function main() {
+  const color = resolveMonitorColor(values);
   if (values.open && values.once) throw new Error("--open 不能与 --once 合用。");
   if (values["open-token"] && (values.open || values.once)) throw new Error("monitor_open_arguments_invalid");
   const threadId = normalizeThreadId(values["thread-id"] ?? values["codex-thread"]);
   if (values["thread-id"] && values["codex-thread"] && threadId !== normalizeThreadId(values["codex-thread"])) throw new Error("state_thread_conflict");
   const defaultThread = values["state-dir"] || process.env.CPI_STATE_DIR !== undefined ? undefined : threadId ?? normalizeThreadId(process.env.CODEX_THREAD_ID);
   const root = await canonicalStateDirectory(resolveStateDirectory(values["state-dir"], defaultThread));
+  const boundThread = resolveStateThread(root, threadId ?? defaultThread);
+  if (!boundThread && !values.session) throw new Error("state_thread_binding_required：目录未绑定 Codex 线程。请使用 get_capabilities 返回的 state_dir；查看旧任务须明确指定 --state-dir 和 --session。");
+  if (values.session && !normalizeThreadId(values.session)) throw new Error("monitor_session_id_invalid");
   if (values.open) {
     const configPath = resolveConfigPath(values.config);
     const config = await readConfig(configPath, !values.config && !process.env.CPI_CONFIG_FILE);
     const entry = fileURLToPath(import.meta.url);
     const args: string[] = [];
-    const boundThread = resolveStateThread(root, threadId);
     if (boundThread) args.push("--thread-id", boundThread);
     if (values.session) args.push("--session", values.session);
     const codexHome = values["codex-home"] ?? process.env.CODEX_HOME;
     if (codexHome) args.push("--codex-home", resolve(codexHome));
-    if (values["no-color"] || process.env.NO_COLOR !== undefined) args.push("--no-color");
+    args.push(color ? "--color" : "--no-color");
     try {
       const status = await openMonitor({ stateDir: root, entry, args, terminal: config.monitor.terminal });
       console.log(status === "opened" ? "监控已在终端中就绪。" : "该状态目录已有监控运行，未重复开窗；沿用已有监控的筛选条件。");
@@ -59,10 +66,10 @@ async function main() {
       console.error("自动开窗不可用，改在当前 TTY 中显示监控；按 q 退出。");
     }
   }
-  const usageReader = new MonitorUsageReader({ home: values["codex-home"], stateDir: root, threadId });
+  const usageReader = new MonitorUsageReader({ home: values["codex-home"], stateDir: root, threadId: boundThread });
   if (values.once) {
-    const snapshots = readSnapshots(root, values.session);
-    const router = new MonitorRouter(() => 12, () => {}, () => {}, { color: false });
+    const snapshots = readSnapshots(root, values.session, boundThread);
+    const router = new MonitorRouter(() => 12, () => {}, () => {}, { color });
     router.update(snapshots);
     router.updateCodexUsage(await usageReader.read(snapshots));
     console.log(router.render(120, true).join("\n"));
@@ -86,10 +93,11 @@ async function main() {
       process.stdin.pause();
       void instance.close();
     };
-    const router = new MonitorRouter(() => terminal.rows, () => tui.requestRender(), quit, { color: !values["no-color"] && process.env.NO_COLOR === undefined });
+    const router = new MonitorRouter(() => terminal.rows, () => tui.requestRender(), quit, { color,
+      ...(boundThread ? { terminateTask: target => requestTaskTermination(root, { ...target, threadId: boundThread }) } : {}) });
     tui.addChild(router);
     tui.setFocus(router);
-    const reader = new SnapshotReader(root, values.session);
+    const reader = new SnapshotReader(root, values.session, boundThread);
     const refresh = () => {
       const snapshots = reader.read();
       router.update(snapshots);

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -68,7 +69,7 @@ for (const [name, outside, approve] of [
     return { action: approve ? 'accept' : 'decline', content: {}, _meta: { approvals_reviewer: 'auto_review' } };
   });
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state')], stderr: 'pipe' });
+    args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--thread-id', randomUUID(), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state')], stderr: 'pipe' });
   transport.stderr?.resume();
   await client.connect(transport);
   const response = await client.callTool({ name: 'delegate_batch', arguments: { requestId: 'files', workspace,

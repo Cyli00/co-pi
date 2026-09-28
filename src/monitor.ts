@@ -3,6 +3,7 @@ import { isTerminal, type Phase, type Snapshot, type TaskState } from "./protoco
 import { filters, MonitorStyle, plainLine, renderFeedLayout, type FeedFilter, type FeedAnchor, type FeedLayout } from "./monitor-view.js";
 import type { CodexUsage } from "./codex-usage.js";
 import { formatMonitorTime } from "./monitor-time.js";
+import type { TerminationTarget } from "./monitor-control.js";
 
 export const DETAIL_SHORTCUTS = "←/→ 分类 · ↑/↓ 滚动 · w/s/PgUp/PgDn 翻页 · fn+↑/Home 回顶 · fn+↓/End 跟随 · t 展开/折叠 · Esc 返回 · ? 帮助";
 const fitHint = (width: number, hints: string[]) => hints.find(hint => visibleWidth(hint) <= width) ?? hints.at(-1)!;
@@ -37,8 +38,14 @@ export class MonitorRouter implements Component {
   private nextTaskNumber = 1;
   private codexUsage: CodexUsage = { state: "searching", automatic: true };
   private readonly style: MonitorStyle;
-  constructor(private height: () => number, private redraw: () => void, private quit: () => void, options: { color?: boolean } = {}) {
+  private confirmation?: { entry: TaskEntry; key: string };
+  private controlNotice = "";
+  private readonly pendingTermination = new Map<string, number>();
+  private readonly terminateTask?: (target: Omit<TerminationTarget, "threadId">) => Promise<void>;
+  constructor(private height: () => number, private redraw: () => void, private quit: () => void,
+    options: { color?: boolean; terminateTask?: (target: Omit<TerminationTarget, "threadId">) => Promise<void> } = {}) {
     this.style = new MonitorStyle(options.color ?? true);
+    this.terminateTask = options.terminateTask;
   }
 
   update(snapshots: Snapshot[]) {
@@ -46,6 +53,14 @@ export class MonitorRouter implements Component {
     const previous = this.entries()[this.selected];
     this.snapshots = snapshots;
     const keys = new Set(this.allEntries().map(entry => this.entryKey(entry)));
+    for (const [key, sentAt] of this.pendingTermination) {
+      const entry = this.allEntries().find(entry => this.entryKey(entry) === key);
+      if (!entry || isTerminal(entry.state.phase) || this.stale(entry.snapshot, entry.state) || Date.now() - sentAt > 10_000) {
+        this.pendingTermination.delete(key);
+        this.controlNotice = entry?.state.error === "terminated_by_user" ? `terminated by user · ${plainLine(entry.state.task.title)}`
+          : entry && isTerminal(entry.state.phase) ? "任务已结束。" : "服务无响应，尚未确认终止；请检查连接。";
+      }
+    }
     for (const key of this.taskViews.keys()) if (!keys.has(key)) this.taskViews.delete(key);
     for (const key of this.taskNumbers.keys()) if (!keys.has(key)) this.taskNumbers.delete(key);
     for (const key of keys) if (!this.taskNumbers.has(key)) this.taskNumbers.set(key, this.nextTaskNumber++);
@@ -94,6 +109,7 @@ export class MonitorRouter implements Component {
     return Boolean(state.error) || ["failed", "blocked", "partial"].includes(state.phase) || this.stale(snapshot, state);
   }
   private status(snapshot: Snapshot, state: TaskState) {
+    if (state.error === "terminated_by_user") return isTerminal(state.phase) ? "terminated by user" : "正在终止";
     if (this.stale(snapshot, state)) return "连接失联·状态未知";
     if (!isTerminal(state.phase)) {
       if (state.runtime?.retry) { const r = state.runtime.retry; return `${r.scope === "model" ? "模型" : "摘要"}重试 ${r.attempt}/${r.maxAttempts} · ${Math.max(0, Math.ceil((Date.parse(r.until) - Date.now()) / 1000))}s`; }
@@ -104,6 +120,11 @@ export class MonitorRouter implements Component {
 
   handleInput(data: string) {
     if (data === "q" || matchesKey(data, "ctrl+c")) { this.quit(); return; }
+    if (this.confirmation) {
+      if (data === "y") { void this.confirmTermination(); return; }
+      if (matchesKey(data, "escape") || data === "n") { this.confirmation = undefined; this.redraw(); }
+      return;
+    }
     if (data === "?") { this.help = !this.help; this.info = false; this.helpOffset = 0; this.redraw(); return; }
     if (data === "i") { this.info = !this.info; this.help = false; this.helpOffset = 0; this.redraw(); return; }
     if (this.help || this.info) {
@@ -113,6 +134,15 @@ export class MonitorRouter implements Component {
       if (data === "k" || matchesKey(data, "up")) this.helpOffset--;
       if (data === "s" || data === "d" || data === " " || matchesKey(data, "pageDown")) this.helpOffset += page;
       if (data === "w" || data === "u" || matchesKey(data, "pageUp")) this.helpOffset -= page;
+      this.redraw(); return;
+    }
+    if (data === "x" && this.terminateTask) {
+      const entry = this.route.page === "tasks" ? this.entries()[this.selected]
+        : this.allEntries().find(entry => this.entryKey(entry) === this.routeKey());
+      if (!entry || isTerminal(entry.state.phase)) this.controlNotice = "只能终止尚未结束的任务。";
+      else if (this.stale(entry.snapshot, entry.state)) this.controlNotice = "服务连接已失联，无法确认终止。";
+      else if (this.pendingTermination.has(this.entryKey(entry))) this.controlNotice = "终止请求已发送，等待任务停止。";
+      else this.confirmation = { entry, key: this.entryKey(entry) };
       this.redraw(); return;
     }
     const up = matchesKey(data, "up") || data === "k";
@@ -174,6 +204,32 @@ export class MonitorRouter implements Component {
     this.redraw();
   }
 
+  private async confirmTermination() {
+    const confirmation = this.confirmation;
+    this.confirmation = undefined;
+    if (!confirmation || !this.terminateTask) return;
+    const entry = this.allEntries().find(entry => this.entryKey(entry) === confirmation.key);
+    if (!entry || isTerminal(entry.state.phase) || this.stale(entry.snapshot, entry.state)) {
+      this.controlNotice = "任务状态已变化，请重新检查后操作。";
+      this.redraw(); return;
+    }
+    this.pendingTermination.set(confirmation.key, Date.now());
+    this.controlNotice = "正在发送终止请求…";
+    this.redraw();
+    try {
+      await this.terminateTask({ sessionId: entry.snapshot.sessionId, batchId: entry.snapshot.batchId, taskId: entry.state.task.id });
+      if (this.pendingTermination.has(confirmation.key)) this.controlNotice = "终止请求已发送，等待任务停止。";
+    } catch (error) {
+      this.pendingTermination.delete(confirmation.key);
+      this.controlNotice = error instanceof Error && error.message === "termination_not_supported"
+        ? "当前 co-pi 服务不支持终止，请更新并重载服务。"
+        : "终止请求未确认，请检查任务状态和目录权限；不会自动重试。";
+    }
+    this.redraw();
+  }
+
+  private controlFooter() { return this.controlNotice ? [this.style.paint("tools", this.controlNotice)] : []; }
+
   render(width: number, allTasks = false): string[] {
     width = Math.max(1, width);
     const rows = Math.max(allTasks ? 12 : 1, this.height());
@@ -182,8 +238,14 @@ export class MonitorRouter implements Component {
       return this.style.color ? clipped : stripTerminalSequences(clipped);
     };
     const paint = this.style.paint.bind(this.style);
+    if (this.confirmation) {
+      const title = plainLine(this.confirmation.entry.state.task.title);
+      const content = [paint("error", "终止所选任务？", true), ...wrapTextWithAnsi(title, width),
+        ...wrapTextWithAnsi("仅停止这项任务，已产生的文件改动保留。", width)];
+      return [...content.slice(0, Math.max(0, rows - 1)), paint("error", "y 终止 · Esc / n 取消", true)].map(line);
+    }
     const entries = this.entries();
-    const header = [paint("text", "CO-PI MONITOR", true) + paint("muted", "  /  子代理工作台 · 只读")];
+    const header = [paint("text", "CO-PI MONITOR", true) + paint("muted", `  /  子代理工作台 · ${this.terminateTask ? "x 终止任务" : "只读"}`)];
     if (this.info) return this.renderInfo(width, rows);
     if (this.help) return this.renderHelp(width, rows);
     if (rows < 4) return [line("终端过小：请增加到至少 4 行 · q 退出")];
@@ -202,10 +264,11 @@ export class MonitorRouter implements Component {
       if (!roomy) header.length = 0;
       header.push(paint("stages", `任务 ${all.length} · 活跃 ${active} · ${this.activeOnly ? "仅活跃" : "全部"}`));
       if (roomy) header.push(paint("muted", "─".repeat(Math.min(width, 160))));
-      const footer = [...this.cacheFooter(width, rows, !roomy), paint("muted", fitHint(width, [
-        "↑/↓ 选择 · Enter 详情 · a 活跃/全部 · i 用量 · ? 帮助 · q 退出",
-        "Enter 详情 · a 筛选 · i 用量 · ? 帮助",
-        "Enter 详情 · a 筛选 · ? 帮助"]))];
+      const controlHint = this.terminateTask ? " · x 终止" : "";
+      const footer = [...this.controlFooter(), ...this.cacheFooter(width, rows, !roomy), paint("muted", fitHint(width, [
+        `↑/↓ 选择 · Enter 详情 · a 活跃/全部${controlHint} · i 用量 · ? 帮助 · q 退出`,
+        `Enter 详情 · a 筛选${controlHint} · ? 帮助`,
+        `Enter 详情${controlHint} · ? 帮助`]))];
       const cardSize = allTasks || (roomy && rows >= entries.length * 2 + 7) ? 2 : 1;
       this.pageSize = allTasks ? Math.max(1, entries.length) : Math.max(1, Math.floor((rows - header.length - footer.length) / cardSize));
       const start = allTasks ? 0 : Math.floor(this.selected / this.pageSize) * this.pageSize;
@@ -255,7 +318,8 @@ export class MonitorRouter implements Component {
       const mode = this.follow ? "● 跟随" : "○ 浏览 · f 跟随";
       const compactShortcut = fitHint(width, [
         `${mode} · ↑↓ 滚动 · Esc 返回 · ? 帮助`, `${mode} · Esc 返回 · ? 帮助`, `${mode} · Esc 返回`]);
-      const footer = [...this.cacheFooter(width, rows, rows < 20), paint("muted", rows < 12 ? compactShortcut : shortcut)];
+      const footer = [...this.controlFooter(), ...this.cacheFooter(width, rows, rows < 20),
+        paint("muted", (this.terminateTask ? "x 终止 · " : "") + (rows < 12 ? compactShortcut : shortcut))];
       const showPosition = rows >= 12;
       this.pageSize = Math.max(1, rows - header.length - footer.length - Number(showPosition));
       let position = this.offset;
@@ -318,6 +382,7 @@ export class MonitorRouter implements Component {
   private renderHelp(width: number, rows: number): string[] {
     const lines = ["快捷键 · Windows / macOS / Linux", "", "↑/↓              选择任务 / 逐行滚动", "w/s / PgUp/PgDn  上一页 / 下一页", "空格             下一页", "fn+↑ / Home      回顶", "f / fn+↓ / End   跟随最新内容", "Enter            打开任务", "a                列表：仅活跃 / 全部", "[ / ]            详情：上一个 / 下一个任务", "←/→ / Tab        切换全部、阶段、工具、输出、交接", "t                展开 / 折叠工具与 SDK 思考文本", "Esc              返回任务列表", "q / Ctrl+C       退出监控（任务继续执行）", "", "思考正文来自 SDK；未提供正文的旧记录仅显示阶段。", "公开文本按 Markdown 渲染，工具调用单独归组。", "", "Fn 组合由终端映射；回顶/跟随需发送 Home/End。", "? / Esc 关闭帮助"];
     lines.splice(2, 0, "i                用量与标识详情 / 返回");
+    if (this.terminateTask) lines.splice(3, 0, "x                终止所选任务，y 确认，Esc 取消", "终止任务保留已有文件改动，并报告 terminated by user。");
     return this.renderTextPage(lines, width, rows, "↑/↓ 滚动 · w/s 翻页 · ? / Esc 关闭帮助");
   }
 

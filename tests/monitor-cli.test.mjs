@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { temporary, task } from './helpers.mjs';
+import { bindStateThread } from '../dist/state-thread.js';
 
 test('--once 输出所有批次的任务，不使用交互分页截断', t => {
   const root = temporary(t);
@@ -14,6 +15,9 @@ test('--once 输出所有批次的任务，不使用交互分页截断', t => {
     const sessionId = randomUUID();
     const directory = join(stateDir, sessionId);
     mkdirSync(directory, { recursive: true });
+    const threadId = randomUUID();
+    bindStateThread(stateDir, threadId);
+    bindStateThread(directory, threadId);
     for (let start = 0; start < total; start += 4) {
       const snapshot = { version: 1, sessionId, batchId: `batch-${start}`, pid: 1, workspace: root, heartbeatAt: at, closed: false,
         tasks: Array.from({ length: Math.min(4, total - start) }, (_, i) => ({

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -92,7 +93,7 @@ for (const mode of ['accept', 'deny', 'unverified', 'invalid-content', 'unsuppor
         ...(mode === 'unverified' ? {} : { _meta: { approvals_reviewer: 'auto_review' } }) };
     });
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state'), '--task-timeout-ms', '30000'],
+      args: [fileURLToPath(new URL('../dist/cli.js', import.meta.url)), '--thread-id', randomUUID(), '--config', writeTestConfig(agent), '--agent-dir', agent, '--state-dir', join(root, 'state'), '--task-timeout-ms', '30000'],
       stderr: 'pipe',
     });
     transport.stderr?.resume();

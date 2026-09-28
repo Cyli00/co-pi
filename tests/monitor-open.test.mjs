@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, readdir, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EventEmitter, once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import { bindStateThread } from '../dist/state-thread.js';
 import { spawnSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { temporary } from './helpers.mjs';
@@ -130,6 +132,7 @@ test('终端检测跳过缺失程序，并以参数数组启动可用程序', as
 
 test('CLI 拒绝冲突参数，非 TTY 的子启动不误报就绪', t => {
   const root = temporary(t);
+  bindStateThread(root, randomUUID());
   const run = extra => spawnSync(process.execPath, ['dist/monitor-cli.js', '--state-dir', root, '--codex-home', join(root, 'empty-codex'), ...extra], {
     encoding: 'utf8', env: { ...process.env, CODEX_THREAD_ID: '' }, windowsHide: true,
   });
