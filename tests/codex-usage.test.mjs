@@ -271,6 +271,7 @@ test('--once 目录绑定优先于环境，--thread-id 冲突时拒绝而不显�
   const sessionId = randomUUID();
   mkdirSync(join(stateDir, sessionId), { recursive: true });
   bindStateThread(stateDir, current.id);
+  bindStateThread(join(stateDir, sessionId), current.id);
   const at = new Date().toISOString();
   writeFileSync(join(stateDir, sessionId, 'batch.json'), JSON.stringify({
     version: 1, sessionId, batchId: 'batch', pid: 1, closed: false, heartbeatAt: at, workspace: f.workspace,

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CpiError, safeText, snapshotSchema, type Snapshot } from "./protocol.js";
 import { MAX_BATCH_TASKS } from "./limits.js";
+import { bindStateThread, readStateThread } from "./state-thread.js";
 
 export { defaultStateDir } from "./state-directory.js";
 
@@ -41,9 +42,10 @@ export class StateStore {
   readonly sessionId = randomUUID();
   readonly directory: string;
   private pending = Promise.resolve();
-  constructor(root: string) {
+  constructor(root: string, threadId?: string) {
     this.directory = join(root, this.sessionId);
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    if (threadId) bindStateThread(this.directory, threadId);
   }
   write(snapshot: Snapshot): Promise<void> {
     const path = join(this.directory, `${snapshot.batchId}.json`);
@@ -77,16 +79,24 @@ async function retryOccupied(operation: () => Promise<void>): Promise<void> {
 
 export class SnapshotReader {
   private readonly cache = new Map<string, { signature: string; snapshot?: Snapshot }>();
-  constructor(private readonly root: string, private readonly sessionId?: string) {}
+  constructor(private readonly root: string, private readonly sessionId?: string, private readonly threadId?: string) {}
 
   read(): Snapshot[] {
     const snapshots: Snapshot[] = [];
+    if (this.threadId) {
+      try { if (readStateThread(this.root) !== this.threadId) { this.cache.clear(); return snapshots; } }
+      catch { this.cache.clear(); return snapshots; }
+    }
     const seen = new Set<string>();
     let directories: string[];
     try { directories = fs.readdirSync(this.root); } catch { this.cache.clear(); return snapshots; }
     for (const name of directories) {
       if (!/^[a-f0-9-]{36}$/.test(name) || (this.sessionId && name !== this.sessionId)) continue;
       const directory = join(this.root, name);
+      if (this.threadId) {
+        try { if (readStateThread(directory) !== this.threadId) continue; }
+        catch { continue; }
+      }
       let files: string[];
       try { files = fs.readdirSync(directory); } catch { continue; }
       for (const file of files) {
@@ -117,6 +127,6 @@ export class SnapshotReader {
   }
 }
 
-export function readSnapshots(root: string, sessionId?: string): Snapshot[] {
-  return new SnapshotReader(root, sessionId).read();
+export function readSnapshots(root: string, sessionId?: string, threadId?: string): Snapshot[] {
+  return new SnapshotReader(root, sessionId, threadId).read();
 }

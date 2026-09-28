@@ -9,11 +9,12 @@ import {
   type MessageMode, type MessageReceipt,
   type Batch, type Handoff, type Snapshot, type TaskState, type WorkerCommand, type WorkerEvent,
 } from "./protocol.js";
-import { readConfig, requireModel, resolveConfigPath, type CpiConfig } from "./config.js";
+import { readConfig, resolveModelConfig, resolveConfigPath, type CpiConfig } from "./config.js";
 import { DEFAULT_PARALLELISM, MAX_PARALLELISM, MAX_BATCH_TASKS } from "./limits.js";
 import { runtimeErrorGuidance, runtimeErrorSummary } from "./runtime-errors.js";
 import { StateStore } from "./store.js";
 import { bindStateThread } from "./state-thread.js";
+import { hasTerminationRequest, initializeMonitorControl } from "./monitor-control.js";
 import { isSettled } from "./handoff-contract.js";
 import { permissionActionSchema, permissionDecisionSchema, type PermissionReviewer } from "./permission-approval.js";
 
@@ -55,6 +56,7 @@ interface LiveWorker {
   child: ChildProcess;
   state: TaskState;
   cancel: () => void;
+  terminateByUser: () => void;
   accepting: boolean;
 }
 
@@ -71,12 +73,17 @@ export class Supervisor extends EventEmitter {
   private readonly dirty = new Map<string, Snapshot>();
   private flushing?: Promise<void>;
   private closePromise?: Promise<void>;
+  private readonly controlTimer: NodeJS.Timeout;
+  private readingControls = false;
 
   constructor(readonly options: SupervisorOptions) {
     super();
     if (!Number.isInteger(options.parallelism ?? DEFAULT_PARALLELISM) || (options.parallelism ?? DEFAULT_PARALLELISM) < 1 || (options.parallelism ?? DEFAULT_PARALLELISM) > MAX_PARALLELISM) throw new CpiError("parallelism_invalid");
     options.threadId = bindStateThread(options.stateDir, options.threadId);
-    this.store = new StateStore(options.stateDir);
+    this.store = new StateStore(options.stateDir, options.threadId);
+    if (options.threadId) initializeMonitorControl(this.store.directory, options.threadId, this.store.sessionId);
+    this.controlTimer = setInterval(() => { void this.readMonitorControls(); }, 250);
+    this.controlTimer.unref();
     this.heartbeat = setInterval(() => {
       for (const run of this.runs.values()) if (!run.snapshot.closed) {
         run.snapshot.heartbeatAt = new Date().toISOString();
@@ -85,6 +92,32 @@ export class Supervisor extends EventEmitter {
       void this.flush();
     }, 5_000);
     this.heartbeat.unref();
+  }
+
+  private async readMonitorControls(): Promise<void> {
+    if (this.readingControls || this.closing || !this.options.threadId) return;
+    this.readingControls = true;
+    try {
+      for (const run of this.runs.values()) {
+        if (run.snapshot.closed) continue;
+        for (const state of run.snapshot.tasks) {
+          if (isTerminal(state.phase) || state.error === "terminated_by_user") continue;
+          const requested = await hasTerminationRequest(this.store.directory, { threadId: this.options.threadId,
+            sessionId: this.store.sessionId, batchId: run.snapshot.batchId, taskId: state.task.id });
+          if (!requested || this.closing || run.snapshot.closed || isTerminal(state.phase)) continue;
+          if (state.phase === "queued") this.finish(state, run.snapshot, "terminated_by_user");
+          else {
+            const worker = this.workers.get(`${run.snapshot.batchId}/${state.task.id}`);
+            if (!worker) continue;
+            state.error = "terminated_by_user";
+            state.summary = "正在终止 · terminated by user";
+            this.activity(state, "termination", "terminated by user");
+            this.changed(run.snapshot);
+            worker.terminateByUser();
+          }
+        }
+      }
+    } finally { this.readingControls = false; }
   }
 
   private async loadExecutionConfig(): Promise<CpiConfig | undefined> {
@@ -166,6 +199,7 @@ export class Supervisor extends EventEmitter {
       for (;;) {
         const state = run.snapshot.tasks[cursor++];
         if (!state) return;
+        if (isTerminal(state.phase)) continue;
         if (run.controller.signal.aborted) {
           this.finish(state, run.snapshot, "cancelled");
           continue;
@@ -263,7 +297,7 @@ export class Supervisor extends EventEmitter {
       const approvalIds = new Set<string>();
       let approvalsPending = 0;
       const stop = (code: string) => {
-        if (settled) return;
+        if (settled || outcome?.error) return;
         approvalLifetime.abort();
         outcome = { error: code };
         void this.send(child, { type: "cancel" }).catch(() => {});
@@ -289,7 +323,7 @@ export class Supervisor extends EventEmitter {
         this.workers.delete(key);
         for (const receipt of state.messages ?? []) {
           if (!["delivered", "rejected", "cancelled"].includes(receipt.status)) this.receipt(batch.requestId, state, {
-            ...receipt, status: outcome?.error === "cancelled" ? "cancelled" : "unknown", at: new Date().toISOString(), error: "worker_finished_before_delivery",
+            ...receipt, status: ["cancelled", "terminated_by_user"].includes(outcome?.error ?? "") ? "cancelled" : "unknown", at: new Date().toISOString(), error: "worker_finished_before_delivery",
           });
         }
         if (outcome?.handoff && !exitError && !outcome.error) {
@@ -304,7 +338,7 @@ export class Supervisor extends EventEmitter {
       const cancel = () => stop("cancelled");
       const timeout = setTimeout(() => stop("task_timeout"), this.options.taskTimeoutMs ?? 30 * 60_000);
       const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > 30_000) stop("worker_unresponsive"); }, 5_000);
-      const live = { child, state, cancel, accepting: true };
+      const live = { child, state, cancel, terminateByUser: () => { live.accepting = false; stop("terminated_by_user"); }, accepting: true };
       this.workers.set(key, live);
       run.controller.signal.addEventListener("abort", cancel, { once: true });
       child.on("message", (raw: unknown) => {
@@ -402,9 +436,9 @@ export class Supervisor extends EventEmitter {
 
   private finish(state: TaskState, snapshot: Snapshot, code: string) {
     if (isTerminal(state.phase)) return;
-    state.phase = code === "cancelled" ? "cancelled" : "failed";
+    state.phase = ["cancelled", "terminated_by_user"].includes(code) ? "cancelled" : "failed";
     state.error = code;
-    state.summary = runtimeErrorSummary(code);
+    state.summary = code === "terminated_by_user" ? "terminated by user" : runtimeErrorSummary(code);
     this.activity(state, "runtime", state.summary);
     this.changed(snapshot);
   }
@@ -443,6 +477,7 @@ export class Supervisor extends EventEmitter {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    clearInterval(this.controlTimer);
     clearInterval(this.heartbeat);
     this.closePromise = (async () => {
       for (const run of this.runs.values()) run.controller.abort();

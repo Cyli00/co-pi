@@ -77,7 +77,8 @@ test('MCP 能力查询读取最新配置和 CLI 覆盖，返回并发与单批�
       assert.equal(result.isError, false);
       return JSON.parse(result.content[0].text);
     };
-    const expected = n => ({ parallelism: override ?? n, parallelism_source: override === undefined ? 'config' : 'cli', max_batch_size: MAX_BATCH_TASKS });
+    const expected = n => ({ parallelism: override ?? n, parallelism_source: override === undefined ? 'config' : 'cli', max_batch_size: MAX_BATCH_TASKS,
+      state_dir: supervisor.options.stateDir, thread_id: null, session_id: supervisor.store.sessionId, config_path: path });
     const before = await readFile(path, 'utf8');
     const files = await readdir(root);
     assert.deepEqual(await query(), expected(2));

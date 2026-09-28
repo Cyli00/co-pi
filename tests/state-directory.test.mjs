@@ -17,6 +17,8 @@ test('macOS 宿主与 seatbelt 共用用户临时目录，其他平台保留持�
   assert.equal(resolveStateDirectory(join(root, 'explicit'), randomUUID(), { CPI_STATE_DIR: join(root, 'env') }), join(root, 'explicit'));
   assert.equal(resolveStateDirectory(undefined, randomUUID(), { CPI_STATE_DIR: join(root, 'env') }), join(root, 'env'));
   assert.throws(() => resolveStateDirectory('', undefined, {}), /state_directory_empty/);
+  assert.throws(() => resolveStateDirectory(undefined, undefined, {}), /codex_thread_id_required/);
+  assert.throws(() => resolveStateDirectory(undefined, '../escape', {}), /codex_thread_id_invalid/);
 });
 
 test('macOS seatbelt 不传状态参数即可完成 CLI 启动并按线程绑定', { skip: process.platform !== 'darwin' }, t => {

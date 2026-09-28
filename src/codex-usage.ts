@@ -185,7 +185,7 @@ export class MonitorUsageReader {
 
   private resolveThread() {
     const bound = this.options.stateDir ? resolveStateThread(this.options.stateDir, this.options.threadId) : normalizeThreadId(this.options.threadId);
-    return bound ?? normalizeThreadId(this.options.threadId ?? process.env.CODEX_THREAD_ID);
+    return bound ?? normalizeThreadId(this.options.threadId ?? (this.options.stateDir ? undefined : process.env.CODEX_THREAD_ID));
   }
 
   async read(_snapshots: readonly { workspace: string }[] = []): Promise<CodexUsage> {

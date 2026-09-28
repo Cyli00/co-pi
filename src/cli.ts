@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createMcpServer } from "./mcp.js";
-import { Supervisor } from "./supervisor.js";
-import { resolveStateDirectory } from "./state-directory.js";
+import { McpSessions } from "./mcp-sessions.js";
 import { resolveConfigPath } from "./config.js";
 import { normalizeThreadId } from "./state-thread.js";
 
@@ -19,7 +17,7 @@ const { values } = parseArgs({ options: {
   help: { type: "boolean" },
 } });
 if (values.help) {
-  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（未传参数时先读取 CPI_STATE_DIR；macOS 默认使用用户临时目录）\n--thread-id <ID>  绑定的主 agent 线程（默认 CODEX_THREAD_ID）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--config <文件>  co-pi TOML 配置（默认 ~/.cpi/config.toml；支持 CPI_CONFIG_FILE）\n--parallelism <1–4>  临时覆盖配置中的并发数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
+  console.log("co-pi：Codex MCP stdio 服务\n--state-dir <目录>  固定线程的状态目录（未传参数时先读取 CPI_STATE_DIR；macOS 默认使用用户临时目录）\n--thread-id <ID>  固定主 agent 线程（默认 CODEX_THREAD_ID；未设置时按调用元数据 threadId 隔离）\n--agent-dir <目录>  pi 配置目录（默认 ~/.pi/agent）\n--config <文件>  co-pi TOML 配置（默认 ~/.cpi/config.toml；支持 CPI_CONFIG_FILE）\n--parallelism <1–4>  临时覆盖配置中的并发数\n--task-timeout-ms <毫秒>  单任务上限（默认 30 分钟）");
 } else {
   await main().catch(error => {
     const code = error?.code;
@@ -34,18 +32,16 @@ async function main() {
   const timeout = Number(values["task-timeout-ms"]);
   if (!Number.isSafeInteger(timeout) || timeout < 100 || timeout > 86_400_000) throw new Error("task_timeout_invalid");
   const threadId = normalizeThreadId(values["thread-id"] ?? process.env.CODEX_THREAD_ID);
-  const stateDir = resolveStateDirectory(values["state-dir"], threadId);
-  await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const supervisor = new Supervisor({
-    stateDir,
+  const sessions = new McpSessions({
+    stateDir: values["state-dir"] ?? process.env.CPI_STATE_DIR,
     configPath: resolveConfigPath(values.config),
     threadId,
     agentDir: resolve(values["agent-dir"] ?? join(homedir(), ".pi", "agent")),
     parallelism: values.parallelism === undefined ? undefined : Number(values.parallelism), taskTimeoutMs: timeout,
   });
-  const server = createMcpServer(supervisor);
+  const server = createMcpServer(sessions);
   let stopping: Promise<void> | undefined;
-  const stop = () => stopping ??= supervisor.close().then(() => server.close());
+  const stop = () => stopping ??= sessions.close().then(() => server.close());
   server.server.onclose = () => { void stop(); };
   process.on("SIGINT", () => { void stop(); });
   process.on("SIGTERM", () => { void stop(); });
